@@ -6,22 +6,22 @@
 # actions to ground truth and plot.  Supports optional tactile videos.
 #
 # Usage (same env as franka_server):
-# cd /share/project/yunfan/cosmos-policy
+# cd /path/to/cosmos-policy
 
 # export FRANKA_COSMOS_CONFIG=cosmos_predict2_2b_480p_franka_shave_cucumber_20260321
-# export FRANKA_COSMOS_CKPT=/share/project/yunfan/cosmos-policy/cosmos_policy/ckpt/cosmos_shave_cucumber2/cosmos_policy_franka_shave_cucumber/cosmos_v2_finetune/cosmos_predict2_2b_480p_franka_shave_cucumber_20260321/checkpoints/iter_000003000
-# export FRANKA_DATASET_STATS_PATH=/share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/dataset_statistics_franka.json
-# export FRANKA_T5_EMBEDDINGS_PATH=/share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/t5_embeddings.pkl
+# export FRANKA_COSMOS_CKPT=/path/to/checkpoints/iter_000003000
+# export FRANKA_DATASET_STATS_PATH=/path/to/dataset_statistics_franka.json
+# export FRANKA_T5_EMBEDDINGS_PATH=/path/to/t5_embeddings.pkl
 
 # Future pred + mask-IoU (saves pred/gt PNGs and future_pred_iou_summary.json):
 #   --future_pred_eval
 #
 # uv run --extra cu128 --group libero --python 3.10 python -m cosmos_policy.experiments.robot.franka.run_franka_openloop \
-#   --hdf5 /share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/train/episode_0.hdf5 \
-#   --cam_front /share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/train/episode_0_cam_front.mp4 \
-#   --cam_high /share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/train/episode_0_cam_high.mp4 \
-#   --tactile_left /share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/train/episode_0_tactile_rectify_left.mp4 \
-#   --tactile_right /share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321/train/episode_0_tactile_rectify_right.mp4 \
+#   --hdf5 /path/to/train/episode_0.hdf5 \
+#   --cam_front /path/to/train/episode_0_cam_front.mp4 \
+#   --cam_high /path/to/train/episode_0_cam_high.mp4 \
+#   --tactile_left /path/to/train/episode_0_tactile_rectify_left.mp4 \
+#   --tactile_right /path/to/train/episode_0_tactile_rectify_right.mp4 \
 #   --out_dir ./openloop_out
 
 import argparse
@@ -48,7 +48,7 @@ from cosmos_policy.experiments.robot.cosmos_utils import (
     load_dataset_stats,
 )
 
-DATA_ROOT = "/share/project/yunfan/tactile_data_hupai/hupai"
+DATA_ROOT = "/path/to/tactile_data_hupai/hupai"
 
 CONFIG_NAME = os.environ.get("FRANKA_COSMOS_CONFIG", "cosmos_predict2_2b_480p_franka_hupai_tactile")
 CKPT_PATH = os.environ.get("FRANKA_COSMOS_CKPT", "")

@@ -146,7 +146,7 @@ cosmos_predict2_2b_480p_libero = LazyDict(
             context_parallel_size=1,
         ),
         checkpoint=dict(
-            load_path=get_checkpoint_path("/share/project/yunfan/cosmos-policy/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"),
+            load_path=get_checkpoint_path("/path/to/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"),
             load_training_state=False,  # This means do not load train state from the base checkpoint above (load_path); but when resuming this job, will load train state
             strict_resume=False,
             save_iter=1000,
@@ -306,8 +306,8 @@ aloha_cosmos_policy_dataset_185_demos = L(ALOHADataset)(
 
 # Franka/tactile: single-arm, cam_front=主视角, cam_high=腕部 (inherits LIBERODataset)
 franka_pick_and_place_baguette_dataset = L(FrankaDataset)(
-    data_dir="/share/project/yunfan/tactile_data_final_action/pick_and_place_baguette_from_plate_to_basket",
-    t5_text_embeddings_path="/share/project/yunfan/tactile_data_final_action/pick_and_place_baguette_from_plate_to_basket/t5_embeddings.pkl",
+    data_dir="/path/to/tactile_data_final_action/pick_and_place_baguette_from_plate_to_basket",
+    t5_text_embeddings_path="/path/to/tactile_data_final_action/pick_and_place_baguette_from_plate_to_basket/t5_embeddings.pkl",
     chunk_size=20,
     use_image_aug=True,
     use_stronger_image_aug=True,
@@ -324,10 +324,10 @@ franka_pick_and_place_baguette_dataset = L(FrankaDataset)(
 )
 
 # Franka whiteboard: state 6-dim (pose only), action 7-dim (pose + gripper). Data under tactile_data_preprocessed_gripper.
-# Run once to generate T5 embeddings: uv run -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /share/project/yunfan/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard
+# Run once to generate T5 embeddings: uv run -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /path/to/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard
 franka_whiteboard_dataset = L(FrankaDataset)(
-    data_dir="/share/project/yunfan/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard",
-    t5_text_embeddings_path="/share/project/yunfan/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard/t5_embeddings.pkl",
+    data_dir="/path/to/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard",
+    t5_text_embeddings_path="/path/to/tactile_data_preprocessed_gripper/pick_eraser_and_erase_marker_from_whiteboard/t5_embeddings.pkl",
     chunk_size=20,
     use_image_aug=True,
     use_stronger_image_aug=True,
@@ -489,10 +489,10 @@ cosmos_predict2_2b_480p_franka_whiteboard = LazyDict(
 # Franka hupai with tactile: state 6D, action 7D, + tactile_rectify_left/right as input & prediction target.
 # Sequence (12 slots): blank, proprio, wrist, primary, tactile_left, tactile_right,
 #                       action, future_proprio, future_wrist, future_primary, future_tactile_left, future_tactile_right
-# Run once to generate T5 embeddings: uv run -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /share/project/yunfan/tactile_data_hupai/hupai
+# Run once to generate T5 embeddings: uv run -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /path/to/tactile_data_hupai/hupai
 franka_hupai_tactile_dataset = L(FrankaDataset)(
-    data_dir="/share/project/yunfan/tactile_data_hupai/hupai",
-    t5_text_embeddings_path="/share/project/yunfan/tactile_data_hupai/hupai/t5_embeddings.pkl",
+    data_dir="/path/to/tactile_data_hupai/hupai",
+    t5_text_embeddings_path="/path/to/tactile_data_hupai/hupai/t5_embeddings.pkl",
     chunk_size=20,
     use_image_aug=True,
     use_stronger_image_aug=True,
@@ -566,7 +566,7 @@ cosmos_predict2_2b_480p_franka_hupai_tactile = LazyDict(
 )
 
 # Franka shave cucumber (tactile): preprocessed with preprocess_tactile_franka_data.py; T5 via save_franka_t5_text_embeddings.
-_SHAVE_CUCUMBER_20260321_DIR = "/share/project/yunfan/attention_data_shave_cucumber/shave_cucumber_20260321"
+_SHAVE_CUCUMBER_20260321_DIR = "/path/to/attention_data_shave_cucumber/shave_cucumber_20260321"
 franka_shave_cucumber_20260321_dataset = L(FrankaDataset)(
     data_dir=_SHAVE_CUCUMBER_20260321_DIR,
     t5_text_embeddings_path=os.path.join(_SHAVE_CUCUMBER_20260321_DIR, "t5_embeddings.pkl"),
@@ -642,7 +642,7 @@ cosmos_predict2_2b_480p_franka_shave_cucumber_20260321 = LazyDict(
 )
 
 # Franka cut banana (tactile): same layout as shave_cucumber; T5 via save_franka_t5_text_embeddings on data_dir.
-_CUT_BANANA_20260321_DIR = "/share/project/yunfan/attention_data_cut_banana/cut_banana_20260321"
+_CUT_BANANA_20260321_DIR = "/path/to/attention_data_cut_banana/cut_banana_20260321"
 franka_cut_banana_20260321_dataset = L(FrankaDataset)(
     data_dir=_CUT_BANANA_20260321_DIR,
     t5_text_embeddings_path=os.path.join(_CUT_BANANA_20260321_DIR, "t5_embeddings.pkl"),
@@ -701,26 +701,6 @@ franka_cut_banana_20260321_no_tactile_img_aug_dataset = L(FrankaDataset)(
     gamma=0.99,
 )
 
-# Current tactile inputs only; no future tactile frames or prediction targets (10-slot layout).
-franka_cut_banana_20260321_tactile_no_future_pred_dataset = L(FrankaDataset)(
-    data_dir=_CUT_BANANA_20260321_DIR,
-    t5_text_embeddings_path=os.path.join(_CUT_BANANA_20260321_DIR, "t5_embeddings.pkl"),
-    chunk_size=20,
-    use_image_aug=True,
-    use_stronger_image_aug=True,
-    use_wrist_images=True,
-    use_third_person_images=True,
-    use_proprio=True,
-    normalize_proprio=True,
-    normalize_actions=True,
-    num_duplicates_per_image=4,
-    demonstration_sampling_prob=1.0,
-    success_rollout_sampling_prob=0.0,
-    return_value_function_returns=False,
-    gamma=0.99,
-    predict_future_tactile=False,
-)
-
 cosmos_predict2_2b_480p_franka_cut_banana_20260321 = LazyDict(
     dict(
         defaults=[
@@ -773,63 +753,6 @@ cosmos_predict2_2b_480p_franka_cut_banana_20260321 = LazyDict(
             group="cosmos_v2_finetune",
             name="cosmos_predict2_2b_480p_franka_cut_banana_20260321",
             wandb_id="franka_cut_banana_20260321",
-        ),
-    )
-)
-
-# Tactile inputs + self-attn bias, but no future tactile prediction (10 slots).
-cosmos_predict2_2b_480p_franka_cut_banana_20260321_tactile_no_future_pred = LazyDict(
-    dict(
-        defaults=[
-            "/experiment/cosmos_predict2_2b_480p_libero",
-            "_self_",
-        ],
-        scheduler=dict(
-            cycle_lengths=[20000, 100000000000000],
-            warm_up_steps=[2000, 0],
-            f_start=[1e-6, 0.06],
-            f_max=[1.0, 0.06],
-            f_min=[0.3, 0.06],
-        ),
-        model=L(CosmosPolicyVideo2WorldModel)(
-            config=dict(
-                state_t=10,
-                min_num_conditional_frames=6,
-                max_num_conditional_frames=6,
-                tokenizer=dict(
-                    chunk_duration=37,
-                ),
-                net=dict(
-                    use_tactile_self_attn_bias=True,
-                    tactile_self_attn_alpha=2.0,
-                    tactile_latent_t_indices=(4, 5),
-                    tactile_attn_chunk_q=32,
-                ),
-            ),
-        ),
-        dataloader_train=L(DataLoader)(
-            num_workers=12,
-            persistent_workers=True,
-            pin_memory=True,
-            dataset=franka_cut_banana_20260321_tactile_no_future_pred_dataset,
-            sampler=L(DistributedSampler)(
-                dataset=franka_cut_banana_20260321_tactile_no_future_pred_dataset,
-                num_replicas=L(parallel_state.get_data_parallel_world_size)(),
-                rank=L(parallel_state.get_data_parallel_rank)(),
-                shuffle=True,
-                seed=0,
-            ),
-            batch_size=16,
-            drop_last=True,
-        ),
-        checkpoint=dict(
-            save_iter=50,
-        ),
-        job=dict(
-            project="cosmos_policy_franka_cut_banana",
-            group="cosmos_v2_finetune",
-            name="cosmos_predict2_2b_480p_franka_cut_banana_20260321_tactile_no_future_pred",
-            wandb_id="franka_cut_banana_20260321_tactile_no_future_pred",
         ),
     )
 )
@@ -1017,7 +940,7 @@ cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbow
         checkpoint=dict(
             # Resume from 50K checkpoint of base Cosmos Policy run
             load_path=get_checkpoint_path(
-                "/share/project/yunfan/cosmos-policy/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"
+                "/path/to/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"
             ),
         ),
         scheduler=dict(
@@ -1097,7 +1020,6 @@ def register_configs():
         cosmos_predict2_2b_480p_franka_cut_banana_20260321,  # Franka cut banana + tactile (same layout as shave cucumber)
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile_img_aug,  # Cut banana + tactile; no aug on tactile RGB
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_tactile_no_attn_bias,  # Tactile inputs, no tactile self-attn bias
-        cosmos_predict2_2b_480p_franka_cut_banana_20260321_tactile_no_future_pred,  # Tactile inputs, no future tactile prediction
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile,  # Same data dir, LIBERO 8-slot (no tactile load)
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func,  # ALOHA planning model
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only,

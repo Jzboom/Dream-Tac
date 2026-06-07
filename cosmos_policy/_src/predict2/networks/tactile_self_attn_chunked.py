@@ -22,7 +22,8 @@ So **you cannot** call `flash_attn_func(q, k, v, ...)` and pass our tactile bias
 
 Our bias is **rank-1**: ``gamma_b * a_i * b_j = (sqrt(gamma_b)*a_i) * (sqrt(gamma_b)*b_j)``.
 
-Following [FlashBias](https://arxiv.org/pdf/2505.12044) / ``cosmos-policy/FlashBias`` (NeurIPS 2025, Tsinghua),
+Following [FlashBias](https://arxiv.org/pdf/2505.12044) (NeurIPS 2025, Tsinghua), this is a self-contained
+re-implementation of the trick (no external FlashBias dependency required):
 use **concatenated Q/K** so the extra inner-product dimension contributes exactly that outer product, with
 **no float attn_mask** — so PyTorch SDPA can select **Flash / cuDNN FMHA** backends (subject to head
 dim rules: ``(headdim + rank)`` padded to a multiple of 8).

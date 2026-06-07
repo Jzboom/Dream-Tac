@@ -211,7 +211,6 @@ def main():
             # --- iv. Parse and Execute Actions ---
             print("4. Parsing and executing actions...")
             actions = result.get("actions", [])
-            # import ipdb;ipdb.set_trace()
             if not actions:
                 print("No actions received from the model. Skipping.")
                 continue

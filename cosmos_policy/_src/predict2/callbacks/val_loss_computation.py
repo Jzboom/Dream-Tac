@@ -47,11 +47,6 @@ from cosmos_policy._src.predict2.models.text2world_model import DiffusionModel
 
 
 class ValLossComputation(EveryNDrawSample):
-    def on_training_step_end(self, model, data_batch, output_batch, loss, iteration=0):
-        """Override to add debug logging before calling parent."""
-        log.critical(f"DEBUG: ValLossComputation.on_training_step_end called at iteration {iteration}", rank0_only=True)
-        super().on_training_step_end(model, data_batch, output_batch, loss, iteration)
-
     """
     Validation loss computation callback inheriting from EveryNDrawSample.
 
@@ -78,8 +73,6 @@ class ValLossComputation(EveryNDrawSample):
         **kwargs,  # Pass any additional EveryNDrawSample parameters
     ):
         """Initialize ValLossComputation by inheriting from EveryNDrawSample."""
-        print(f"DEBUG: ValLossComputation.__init__ called with every_n={every_n}, max_eval_samples={max_eval_samples}")
-        log.critical(f"DEBUG: Initializing ValLossComputation with every_n={every_n}, is_ema={is_ema}", rank0_only=True)
         # Initialize parent with x0_prediction enabled, sampling disabled
         super().__init__(
             every_n=every_n,
@@ -107,35 +100,22 @@ class ValLossComputation(EveryNDrawSample):
 
     def on_train_start(self, model: DiffusionModel, iteration: int = 0) -> None:
         """Initialize validation dataset and call parent's on_train_start."""
-        log.critical(f"DEBUG: ValLossComputation.on_train_start called at iteration {iteration}", rank0_only=True)
-
         # Call parent's on_train_start to initialize base functionality
         super().on_train_start(model, iteration)
 
         # Set up validation dataset
         self._setup_validation_dataset(model)
 
-        log.critical(
-            f"DEBUG: ValLossComputation.on_train_start completed, dataloader: {self.val_dataloader is not None}",
-            rank0_only=True,
-        )
-
     def _setup_validation_dataset(self, model: DiffusionModel) -> None:
         """Set up the validation dataset for evaluation."""
-        log.critical(f"DEBUG: Starting _setup_validation_dataset for {self.val_dataset_name}", rank0_only=True)
-
         # Get video dimensions from model configuration
         video_height, video_width = model.get_video_height_width()
         num_video_frames = model.tokenizer.get_pixel_num_frames(model.get_num_video_latent_frames())
-        log.critical(
-            f"DEBUG: Video dimensions: {video_height}x{video_width}, frames: {num_video_frames}", rank0_only=True
-        )
 
         # Get dataset configuration - fail fast if not found
         dataset_option: ItemDatasetConfig = get_itemdataset_option(self.val_dataset_name)
         dataset_path = dataset_option.path
         dataset_length = dataset_option.length
-        log.critical(f"DEBUG: Found dataset option: path={dataset_path}, length={dataset_length}", rank0_only=True)
 
         log.warning(
             f"Using validation dataset: {self.val_dataset_name} at path: {dataset_path}. "
@@ -145,34 +125,24 @@ class ValLossComputation(EveryNDrawSample):
         # Limit evaluation samples and ensure FSDP compatibility
         dataset_length = min(dataset_length, self.max_eval_samples)
         dataset_length = int(dataset_length // model.config.fsdp_shard_size * model.config.fsdp_shard_size)
-        log.critical(f"DEBUG: Final dataset_length after FSDP alignment: {dataset_length}", rank0_only=True)
 
         # Distribute dataset across ranks
         if torch.distributed.get_world_size() > parallel_state.get_data_parallel_world_size():
             num_replicate = parallel_state.get_data_parallel_world_size()
             data_parallel_id = parallel_state.get_data_parallel_rank()
             start_idx, end_idx, is_overflow = calculate_indices(dataset_length, num_replicate, data_parallel_id)
-            log.critical(
-                f"DEBUG: Using data parallel: replicate={num_replicate}, id={data_parallel_id}", rank0_only=True
-            )
         else:
             world_size, rank = distributed.get_world_size(), distributed.get_rank()
             start_idx, end_idx, is_overflow = calculate_indices(dataset_length, world_size, rank)
-            log.critical(f"DEBUG: Using world distributed: world_size={world_size}, rank={rank}", rank0_only=True)
-
-        log.critical(f"DEBUG: Calculated indices: {start_idx}-{end_idx}, overflow={is_overflow}", rank0_only=True)
 
         # Debug mode: only evaluate 2 samples
         if self.is_debug:
             end_idx = min(start_idx + 2, end_idx)
 
         if is_overflow:
-            log.critical("DEBUG: Overflow in calculating indices, SKIPPING.", rank0_only=True)
+            log.warning("ValLoss: Index overflow when distributing validation dataset; skipping validation.", rank0_only=True)
             self.val_dataloader = None
         else:
-            log.critical(
-                f"DEBUG: Creating PromptVideoItemDataset with indices {start_idx}-{end_idx}...", rank0_only=True
-            )
             # Create validation dataloader
             self.val_dataloader = DataLoader(
                 PromptVideoItemDataset(
@@ -189,7 +159,6 @@ class ValLossComputation(EveryNDrawSample):
                 persistent_workers=False,
                 shuffle=False,
             )
-            log.critical(f"DEBUG: Successfully created dataloader: {self.val_dataloader is not None}", rank0_only=True)
 
         log.critical(
             f"ValLoss: Finished setting up validation dataloader for {self.val_dataset_name} "
@@ -204,13 +173,10 @@ class ValLossComputation(EveryNDrawSample):
         This method iterates through the validation dataset and applies the parent's
         x0_pred method to each batch, then aggregates and logs the validation metrics.
         """
-        log.critical(f"DEBUG: ValLossComputation.every_n_impl called at iteration {iteration}", rank0_only=True)
         del data_batch, output_batch, loss  # Not used, we use validation data
 
         if self.val_dataloader is None:
-            log.critical(
-                f"DEBUG: ValLoss: Skipping validation at iteration {iteration} (no dataloader)", rank0_only=True
-            )
+            log.info(f"ValLoss: Skipping validation at iteration {iteration} (no dataloader)", rank0_only=True)
             return
 
         tag = "ema" if self.is_ema else "reg"

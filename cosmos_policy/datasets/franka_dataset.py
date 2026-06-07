@@ -46,15 +46,12 @@ class FrankaDataset(LIBERODataset):
     """
     Dataset for Franka/tactile preprocessed data (cam_front=主视角, cam_high=腕部).
     Optional: tactile_rectify_left, tactile_rectify_right (same processing as primary/wrist).
-    When tactile is active: video has 12 slots (adds current/future tactile left & right) by default,
-    or 10 slots when ``predict_future_tactile=False`` (current tactile only); else 8 slots without tactile.
+    When tactile is active: video has 12 slots (adds current/future tactile left & right); else 8 slots.
 
     Args:
         use_tactile: If ``None`` (default), load and use tactile when HDF5 contains tactile video paths.
             If ``False``, never load tactile videos and always use the 8-slot layout (for no-tactile baselines).
         use_tactile_image_aug: If ``False``, skip ``apply_image_aug`` on tactile blocks only (resize still applied).
-        predict_future_tactile: If ``False`` with tactile enabled, keep current tactile inputs (slots 4-5) but
-            omit future tactile frames/targets (10-slot layout, ``state_t=10``).
     """
 
     def __init__(
@@ -81,7 +78,6 @@ class FrankaDataset(LIBERODataset):
         gamma: float = 0.99,
         use_tactile: Optional[bool] = None,
         use_tactile_image_aug: bool = True,
-        predict_future_tactile: bool = True,
     ):
         # Same attributes as LIBERODataset
         self.data_dir = data_dir
@@ -105,7 +101,6 @@ class FrankaDataset(LIBERODataset):
         self.gamma = gamma
         self._use_tactile_mode = use_tactile
         self.use_tactile_image_aug = use_tactile_image_aug
-        self.predict_future_tactile = predict_future_tactile
 
         assert self.use_wrist_images or self.use_third_person_images, (
             "Must use at least one of wrist images or third-person images!"
@@ -269,6 +264,7 @@ class FrankaDataset(LIBERODataset):
             return block
 
         tactile_cur = make_tactile_block(relative_step_idx)   # (8, H, W, 3)
+        tactile_fut = make_tactile_block(future_frame_idx)   # (8, H, W, 3)
         tactile_use_aug = self.use_image_aug and self.use_tactile_image_aug
         tactile_cur = preprocess_image(
             tactile_cur,
@@ -277,56 +273,39 @@ class FrankaDataset(LIBERODataset):
             use_image_aug=tactile_use_aug,
             stronger_image_aug=self.use_stronger_image_aug if tactile_use_aug else False,
         )  # (C, 8, H, W)
+        tactile_fut = preprocess_image(
+            tactile_fut,
+            final_image_size=self.final_image_size,
+            normalize_images=self.normalize_images,
+            use_image_aug=tactile_use_aug,
+            stronger_image_aug=self.use_stronger_image_aug if tactile_use_aug else False,
+        )  # (C, 8, H, W)
 
-        # Parent video: (C, 29, H, W) = 1 (blank) + 7*4 (proprio, wrist, primary, action, future x3).
+        # Parent video: (C, 29, H, W) = 1 (blank) + 7*4 (proprio, wrist, primary, action, future x3). Insert 8 frames after primary (13), 8 after future primary (29).
         video = sample["video"]  # (C, T, H, W)
-        if self.predict_future_tactile:
-            tactile_fut = make_tactile_block(future_frame_idx)   # (8, H, W, 3)
-            tactile_fut = preprocess_image(
-                tactile_fut,
-                final_image_size=self.final_image_size,
-                normalize_images=self.normalize_images,
-                use_image_aug=tactile_use_aug,
-                stronger_image_aug=self.use_stronger_image_aug if tactile_use_aug else False,
-            )  # (C, 8, H, W)
-            new_video = torch.cat(
-                [
-                    video[:, :13],   # blank, proprio, wrist, primary
-                    tactile_cur,     # 8 frames (tactile_left 4, tactile_right 4)
-                    video[:, 13:29], # action, future proprio, wrist, primary
-                    tactile_fut,     # 8 frames (future tactile)
-                ],
-                dim=1,
-            )  # (C, 45, H, W) = 1 + 11*4 for state_t=12
-            latent_shift = 2
-        else:
-            new_video = torch.cat(
-                [
-                    video[:, :13],   # blank, proprio, wrist, primary
-                    tactile_cur,     # 8 frames (tactile_left 4, tactile_right 4)
-                    video[:, 13:29], # action, future proprio, wrist, primary
-                ],
-                dim=1,
-            )  # (C, 37, H, W) = 1 + 9*4 for state_t=10
-            latent_shift = 2
+        new_video = torch.cat(
+            [
+                video[:, :13],   # blank, proprio, wrist, primary
+                tactile_cur,     # 8 frames (tactile_left 4, tactile_right 4)
+                video[:, 13:29], # action, future proprio, wrist, primary
+                tactile_fut,     # 8 frames (future tactile)
+            ],
+            dim=1,
+        )  # (C, 45, H, W) = 1 + 11*4 for state_t=12
         sample["video"] = new_video
 
-        # Shift latent indices that come after the inserted current tactile block (2 slots = 8 frames)
-        sample["action_latent_idx"] = sample["action_latent_idx"] + latent_shift
+        # Shift latent indices that come after the two inserted blocks (each 2 slots = 8 frames)
+        sample["action_latent_idx"] = sample["action_latent_idx"] + 2
         if sample.get("future_proprio_latent_idx", -1) >= 0:
-            sample["future_proprio_latent_idx"] = sample["future_proprio_latent_idx"] + latent_shift
+            sample["future_proprio_latent_idx"] = sample["future_proprio_latent_idx"] + 2
         if sample.get("future_wrist_image_latent_idx", -1) >= 0:
-            sample["future_wrist_image_latent_idx"] = sample["future_wrist_image_latent_idx"] + latent_shift
+            sample["future_wrist_image_latent_idx"] = sample["future_wrist_image_latent_idx"] + 2
         if sample.get("future_image_latent_idx", -1) >= 0:
-            sample["future_image_latent_idx"] = sample["future_image_latent_idx"] + latent_shift
+            sample["future_image_latent_idx"] = sample["future_image_latent_idx"] + 2
 
-        if self.predict_future_tactile:
-            # Tactile latent indices for loss logging (slots 10 and 11 in the 12-slot sequence)
-            sample["future_tactile_left_latent_idx"] = torch.tensor(10, dtype=torch.long)
-            sample["future_tactile_right_latent_idx"] = torch.tensor(11, dtype=torch.long)
-        else:
-            sample["future_tactile_left_latent_idx"] = torch.tensor(-1, dtype=torch.long)
-            sample["future_tactile_right_latent_idx"] = torch.tensor(-1, dtype=torch.long)
+        # Tactile latent indices for loss logging (slots 10 and 11 in the 12-slot sequence)
+        sample["future_tactile_left_latent_idx"] = torch.tensor(10, dtype=torch.long)
+        sample["future_tactile_right_latent_idx"] = torch.tensor(11, dtype=torch.long)
 
         # Per-step scalar gate for tactile self-attn bias (vs previous timestep in episode)
         tl = episode_data["tactile_left_images"]

@@ -10,7 +10,7 @@ Usage:
     uv run -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /path/to/preprocessed/task_folder
 
 Example:
-    uv run --extra cu128 --group aloha -m cosmos_policy.datasets.save_franka_t5_text_embeddings         --data_dir /share/project/yunfan/attention_data_cut_banana/cut_banana_20260321
+    uv run --extra cu128 --group franka -m cosmos_policy.datasets.save_franka_t5_text_embeddings --data_dir /path/to/preprocessed_data
 """
 
 import argparse

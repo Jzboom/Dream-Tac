@@ -25,8 +25,8 @@ Task name: top-level folder name with underscores removed (e.g. insert_nut_into_
 
 Usage:
 uv run --extra cu128 --group libero --python 3.10 python cosmos_policy/experiments/robot/franka/preprocess_tactile_franka_data.py \
-    --dataset_path /share/project/yunfan/cut_banana/cut_banana_20260321 \
-    --out_base_dir /share/project/yunfan/attention_data_cut_banana \
+    --dataset_path /path/to/cut_banana/cut_banana_20260321 \
+    --out_base_dir /path/to/attention_data_cut_banana \
     --percent_val 0.0
 """
 
@@ -265,7 +265,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset_path",
-        default="/share/project/yunfan/tactile_data/pick_eraser_and_erase_marker_from_whiteboard",
+        default="/path/to/tactile_data/pick_eraser_and_erase_marker_from_whiteboard",
         help="Path to task folder containing (recursive) .hdf5 files.",
     )
     parser.add_argument("--out_base_dir", required=True, help="Base directory for preprocessed output.")

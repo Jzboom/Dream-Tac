@@ -6,11 +6,11 @@
 #         state (proprio 6-dim pose only), instruction.
 #
 # Usage:
-#   export FRANKA_COSMOS_CKPT=/share/project/yunfan/cosmos-policy/cosmos_policy/ckpt/cosmos_banana_base/iter_000003350
-#   export FRANKA_DATASET_STATS_PATH=/share/project/yunfan/attention_data_cut_banana/cut_banana_20260321/dataset_statistics_franka.json
-#   export FRANKA_T5_EMBEDDINGS_PATH=/share/project/yunfan/attention_data_cut_banana/cut_banana_20260321/t5_embeddings.pkl
+#   export FRANKA_COSMOS_CKPT=/path/to/checkpoints/iter_000003350
+#   export FRANKA_DATASET_STATS_PATH=/path/to/dataset_statistics_franka.json
+#   export FRANKA_T5_EMBEDDINGS_PATH=/path/to/t5_embeddings.pkl
 #   export FRANKA_USE_TACTILE=1  # enable tactile (default: auto-detect from model state_t)
-#   cd /share/project/yunfan/cosmos-policy
+#   cd /path/to/cosmos-policy
 #   uv run --extra cu128 --group libero --python 3.10 python -m cosmos_policy.experiments.robot.franka.franka_server
 
 # Inference API:
@@ -64,7 +64,7 @@ SERVICE_CONFIG = {
     "max_content_length": 16 * 1024 * 1024,
 }
 
-DATA_ROOT = "/share/project/yunfan/tactile_data_hupai/hupai"
+DATA_ROOT = "/path/to/tactile_data_hupai/hupai"
 CONFIG_NAME = os.environ.get("FRANKA_COSMOS_CONFIG", "cosmos_predict2_2b_480p_franka_hupai_tactile")
 CKPT_PATH = os.environ.get("FRANKA_COSMOS_CKPT", "")
 CONFIG_FILE = os.environ.get("FRANKA_COSMOS_CONFIG_FILE", "cosmos_policy/config/config.py")
