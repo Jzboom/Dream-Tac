@@ -1,0 +1,71 @@
+# ---- Original ----
+/.cuda-name
+/build
+
+# ---- Virtual environments ----
+/.venv/
+/.venv-cursor/
+.venv/
+venv/
+env/
+
+# ---- Python caches / build artifacts ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+*.swp
+/.vscode/
+
+# ---- Scratch / local notes ----
+/txt.txt
+*.backup
+
+# ---- Model weights & checkpoints (host on HuggingFace, not GitHub) ----
+/cosmos_policy/ckpt/
+/cosmos_policy/whiteboard_ckpt/
+/Cosmos-Predict2-2B-Video2World/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# ---- Datasets (downloaded / preprocessed) ----
+/ALOHA-Cosmos-Policy/preprocessed/
+/LIBERO-Cosmos-Policy/all_episodes/
+*.hdf5
+*.h5
+
+# ---- Experiment / inference outputs ----
+/vae_recon_tactile/
+/diffusion_step_analysis/
+/test/
+/openloop_out*/
+/openloop_bench*/
+/openloop_latency*/
+
+# ---- Logging ----
+wandb/
+**/wandb/
+*.log
+
+# ---- Third-party project (clone of thuml/FlashBias; add as submodule if needed) ----
+/FlashBias/
+
+# ---- Media (large generated assets) ----
+*.mp4
+*.avi
+*.mov
+*.mkv
