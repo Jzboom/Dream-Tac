@@ -51,20 +51,13 @@ cosmos_policy/
 
 ## Supported tasks
 
-Dream-Tac is evaluated on six language-conditioned contact-rich manipulation tasks on a Franka Emika Panda with two RealSense cameras and two Xense Photon tactile sensors.
+Dream-Tac is evaluated on language-conditioned contact-rich manipulation tasks on a Franka Emika Panda with two RealSense cameras and two Xense Photon tactile sensors. Each task has a corresponding experiment config in `cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py`, for example:
 
-| Task (paper) | Experiment config name |
-|---|---|
-| Pick Baguette | `cosmos_predict2_2b_480p_franka_pick_and_place_baguette` |
-| Clean Whiteboard | `cosmos_predict2_2b_480p_franka_whiteboard` |
-| Peel Cucumber | `cosmos_predict2_2b_480p_franka_shave_cucumber_20260321` |
-| Play Mahjong | `cosmos_predict2_2b_480p_franka_hupai_tactile` |
-| Cut Banana | `cosmos_predict2_2b_480p_franka_cut_banana_20260321` |
-| Insert USB | *not included in this release* |
+```
+cosmos_predict2_2b_480p_franka_cut_banana_20260321
+```
 
-> **Note:** The Insert USB task is described in the paper but its experiment config is not shipped in this repository. The other five tasks are fully supported.
-
-Ablation configs (no tactile / no tactile image aug) are also available, e.g. `cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile`.
+Ablation configs (e.g. no tactile / no tactile image aug) are also available, such as `cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile`.
 
 ---
 
