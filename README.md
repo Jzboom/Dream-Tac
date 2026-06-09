@@ -6,7 +6,7 @@ Official implementation of **Dream-Tac**, a unified tactile world action model t
 **Affiliations:** Peking University, HKUST, Nanjing University  
 \*Equal contribution · †Project leader · ‡Corresponding author
 
-📄 Paper: [`arxiv_tactile.pdf`](arxiv_tactile.pdf)  
+📄 Paper: [arXiv:2606.08737](https://arxiv.org/abs/2606.08737)  
 🔗 Code: [https://github.com/LYFCLOUDFAN/Dream-Tac](https://github.com/LYFCLOUDFAN/Dream-Tac)
 
 ---
@@ -269,6 +269,7 @@ If you find Dream-Tac useful, please cite our paper:
 @article{lou2026dreamtac,
   title={Dream-Tac: A Unified Tactile World Action Model for Contact-Rich Robot Manipulation},
   author={Lou, Yunfan and Ye, Yifan and Fu, Yankai and Cen, Jun and Chi, Xiaowei and Lyu, Yaoxu and Jia, Peidong and Han, Sirui and Lu, Zhihe and Zhang, Shanghang},
+  journal={arXiv preprint arXiv:2606.08737},
   year={2026}
 }
 ```
