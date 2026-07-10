@@ -191,6 +191,8 @@ class JobConfig:
     name: str = ""
     # W&B mode, can be "online", or "disabled".
     wandb_mode: str = "online"
+    # Optional W&B entity/team. If unset, wandb falls back to the current login/default entity.
+    wandb_entity: Optional[str] = None
     # Optional fixed W&B run id. When set, always use this id (resume="allow") so repeated runs log to the same run.
     wandb_id: Optional[str] = None
     # Cluster configuration (optional, for cluster-specific settings).
@@ -202,7 +204,7 @@ class JobConfig:
 
     @property
     def path_local(self) -> str:
-        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "/tmp/imaginaire4-output")
+        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints")
         return f"{local_root}/{self.path}"
 
 

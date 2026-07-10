@@ -389,13 +389,19 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 .to(condition.gt_frames.dtype)
             )
 
-        # Tactile self-attn gate (Franka / state_t=12): from dataloader, shape (B,) float32
+        # Tactile self-attn gate: from dataloader, shape (B,) or grouped shape (B, G).
         if "tactile_self_attn_gate" in data_batch:
             tg = data_batch["tactile_self_attn_gate"]
             if not isinstance(tg, torch.Tensor):
                 tg = torch.as_tensor(tg, dtype=torch.float32, device=latent_state.device)
             else:
-                tg = tg.to(device=latent_state.device, dtype=torch.float32).reshape(-1)
+                tg = tg.to(device=latent_state.device, dtype=torch.float32)
+            if tg.ndim == 0:
+                tg = tg.reshape(1)
+            elif tg.ndim == 1:
+                tg = tg.reshape(-1)
+            else:
+                tg = tg.reshape(tg.shape[0], -1)
             kw = condition.to_dict(skip_underscore=False)
             kw["tactile_self_attn_gate_B"] = tg
             condition = type(condition)(**kw)

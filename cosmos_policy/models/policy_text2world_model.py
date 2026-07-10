@@ -297,6 +297,9 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             future_tactile_right_indices=(
                 data_batch["future_tactile_right_latent_idx"] if "future_tactile_right_latent_idx" in data_batch else None
             ),
+            future_tactile_indices=(
+                data_batch["future_tactile_latent_indices"] if "future_tactile_latent_indices" in data_batch else None
+            ),
             rollout_data_mask=data_batch["rollout_data_mask"],
             world_model_sample_mask=data_batch["world_model_sample_mask"],
             value_function_sample_mask=data_batch["value_function_sample_mask"],
@@ -331,6 +334,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
         future_image2_indices: Optional[torch.Tensor],
         future_tactile_left_indices: Optional[torch.Tensor],
         future_tactile_right_indices: Optional[torch.Tensor],
+        future_tactile_indices: Optional[torch.Tensor],
         rollout_data_mask: torch.Tensor,
         world_model_sample_mask: torch.Tensor,
         value_function_sample_mask: torch.Tensor,
@@ -426,6 +430,34 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
         B, T = x0_B_C_T_H_W.shape[0], x0_B_C_T_H_W.shape[2]
         final_mask_B_T = torch.ones((B, T), dtype=torch.long, device=sigma_B_T.device)  # All 1s mask initially
 
+        def _mark_latent_indices(mask_B_T: torch.Tensor, sample_indices: torch.Tensor, latent_indices: Optional[torch.Tensor]) -> None:
+            if latent_indices is None or sample_indices.numel() == 0:
+                return
+            sample_indices = sample_indices.to(device=mask_B_T.device, dtype=torch.long)
+            latent_indices = torch.as_tensor(latent_indices, device=mask_B_T.device, dtype=torch.long)
+            if latent_indices.ndim == 0:
+                idx = latent_indices.reshape(1)
+                if torch.all(idx != -1):
+                    mask_B_T[sample_indices, idx[0]] = 1
+                return
+            if latent_indices.ndim == 1:
+                if latent_indices.shape[0] == mask_B_T.shape[0]:
+                    idx = latent_indices[sample_indices]
+                    valid = idx != -1
+                    if torch.any(valid):
+                        mask_B_T[sample_indices[valid], idx[valid]] = 1
+                else:
+                    idx = latent_indices[latent_indices != -1]
+                    if idx.numel() > 0:
+                        mask_B_T[sample_indices[:, None], idx[None, :]] = 1
+                return
+            for col in range(latent_indices.shape[1]):
+                idx = latent_indices[:, col][sample_indices]
+                valid = idx != -1
+                if torch.any(valid):
+                    selected = sample_indices[valid]
+                    mask_B_T[selected, idx[valid]] = 1
+
         # If using input masking for value prediction, mask out the loss for everything except the value prediction
         # This is necessary since otherwise the loss will be computed for all latent frames, not just the value prediction frame
         if (
@@ -487,6 +519,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[world_batch_indices, future_tactile_left_indices[world_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[world_batch_indices, future_tactile_right_indices[world_batch_indices]] = 1
+                _mark_latent_indices(mask_B_T, world_batch_indices, future_tactile_indices)
             # Rollout value-function samples (rollout_data_mask == 1 and value_function_sample_mask == 1)
             value_idx_B = (
                 ((rollout_data_mask == 1) & (value_function_sample_mask == 1)).to(torch.long).to(sigma_B_T.device)
@@ -535,6 +568,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[demo_batch_indices, future_tactile_left_indices[demo_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[demo_batch_indices, future_tactile_right_indices[demo_batch_indices]] = 1
+                _mark_latent_indices(mask_B_T, demo_batch_indices, future_tactile_indices)
             # Rollout world-model samples (rollout_data_mask == 1 and world_model_sample_mask == 1)
             world_idx_B = (rollout_data_mask == 1) & (world_model_sample_mask == 1).to(torch.long).to(sigma_B_T.device)
             if torch.any(world_idx_B):
@@ -559,6 +593,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[world_batch_indices, future_tactile_left_indices[world_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[world_batch_indices, future_tactile_right_indices[world_batch_indices]] = 1
+                _mark_latent_indices(mask_B_T, world_batch_indices, future_tactile_indices)
             final_mask_B_T = final_mask_B_T * mask_B_T
 
         # If applicable, upweight the loss on the action predictions by a factor of `action_loss_multiplier`
@@ -579,6 +614,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             self.config.mask_loss_for_action_future_state_prediction
             or self.config.mask_current_state_action_for_value_prediction
             or self.config.mask_future_state_for_qvalue_prediction
+            or self.config.mask_value_prediction_loss_for_policy_prediction
             or self.config.action_loss_multiplier != 1
         ):
             kendall_loss = kendall_loss * rearrange(final_mask_B_T, "b t -> b 1 t 1 1")

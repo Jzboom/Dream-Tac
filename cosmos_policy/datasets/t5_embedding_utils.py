@@ -24,23 +24,47 @@ from typing import Dict, List
 import torch
 from tqdm import tqdm
 
-from cosmos_policy._src.predict2.inference.get_t5_emb import get_text_embedding
+from cosmos_policy._src.predict2.inference.get_t5_emb import CosmosT5TextEncoder, get_text_embedding
 
 
-def generate_t5_embeddings(unique_commands: List[str]) -> Dict[str, torch.Tensor]:
+def generate_t5_embeddings(
+    unique_commands: List[str],
+    model_name: str = "google-t5/t5-11b",
+    device: str = "cuda",
+    cache_dir: str | None = None,
+    local_files_only: bool = True,
+) -> Dict[str, torch.Tensor]:
     """
     Generate T5 text embeddings for a list of commands.
 
     Args:
         unique_commands: List of unique command strings
+        model_name: Local T5 path or HuggingFace model id
+        device: Device used for T5 encoding
+        cache_dir: Optional HuggingFace cache directory
+        local_files_only: If True, do not download model files
 
     Returns:
         Dictionary mapping command strings to their T5 embeddings (bfloat16, on CPU)
     """
     t5_text_embeddings = dict()
     print("Getting text embeddings...")
+    try:
+        encoder = CosmosT5TextEncoder(
+            model_name=model_name,
+            device=device,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+    except OSError as exc:
+        mode = "local-only" if local_files_only else "download-enabled"
+        raise OSError(
+            f"Could not load T5 model {model_name!r} in {mode} mode. "
+            "Pass --t5_model_path /path/to/local/t5-11b, or add --allow_download if this machine can access HuggingFace."
+        ) from exc
+
     for command in tqdm(unique_commands):
-        embedding = get_text_embedding(command).to(dtype=torch.bfloat16).cpu()  # (1, 512, 1024)
+        embedding = get_text_embedding(command, encoder=encoder, device=device).to(dtype=torch.bfloat16).cpu()
         t5_text_embeddings[command] = embedding
     return t5_text_embeddings
 

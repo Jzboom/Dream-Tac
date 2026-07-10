@@ -22,14 +22,14 @@ from transformers import T5EncoderModel, T5TokenizerFast
 
 transformers.logging.set_verbosity_error()
 
-T5_MODEL_DIR = "checkpoints/google-t5/t5-11b"
+T5_MODEL_DIR = "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/google-t5/t5-11b"
 
 
 class CosmosT5TextEncoder(torch.nn.Module):
     """Handles T5 text encoding operations."""
 
     def __init__(
-        self, model_name: str = "google-t5/t5-11b", device: str = "cuda", cache_dir=None, local_files_only=False
+        self, model_name: str = T5_MODEL_DIR, device: str = "cuda", cache_dir=None, local_files_only=False
     ):
         """Initializes the T5 tokenizer and encoder.
 

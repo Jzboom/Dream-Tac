@@ -146,7 +146,7 @@ cosmos_predict2_2b_480p_libero = LazyDict(
             context_parallel_size=1,
         ),
         checkpoint=dict(
-            load_path=get_checkpoint_path("/path/to/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"),
+            load_path=get_checkpoint_path("/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"),
             load_training_state=False,  # This means do not load train state from the base checkpoint above (load_path); but when resuming this job, will load train state
             strict_resume=False,
             save_iter=1000,
@@ -940,7 +940,7 @@ cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbow
         checkpoint=dict(
             # Resume from 50K checkpoint of base Cosmos Policy run
             load_path=get_checkpoint_path(
-                "/path/to/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"
+                "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt"
             ),
         ),
         scheduler=dict(

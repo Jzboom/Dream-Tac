@@ -593,6 +593,7 @@ class Attention(nn.Module):
         tactile_outer_a_S: Optional[torch.Tensor] = None,
         tactile_outer_b_S: Optional[torch.Tensor] = None,
         tactile_gamma_B: Optional[torch.Tensor] = None,
+        tactile_gamma_BS: Optional[torch.Tensor] = None,
         tactile_attn_chunk_q: int = 32,
     ):
         """
@@ -619,6 +620,7 @@ class Attention(nn.Module):
                 tactile_attn_chunk_q,
                 self.output_proj,
                 self.output_dropout,
+                gamma_BS=tactile_gamma_BS,
             )
         return self.compute_attention(q, k, v, video_size=video_size, kv_cache_cfg=kv_cache_cfg)
 
@@ -1314,6 +1316,7 @@ class Block(nn.Module):
         tactile_outer_a_S: Optional[torch.Tensor] = None,
         tactile_outer_b_S: Optional[torch.Tensor] = None,
         tactile_gamma_B: Optional[torch.Tensor] = None,
+        tactile_gamma_BS: Optional[torch.Tensor] = None,
         tactile_attn_chunk_q: int = 32,
     ) -> torch.Tensor:
         if extra_per_block_pos_emb is not None:
@@ -1386,6 +1389,7 @@ class Block(nn.Module):
                 tactile_outer_a_S=tactile_outer_a_S,
                 tactile_outer_b_S=tactile_outer_b_S,
                 tactile_gamma_B=tactile_gamma_B,
+                tactile_gamma_BS=tactile_gamma_BS,
                 tactile_attn_chunk_q=tactile_attn_chunk_q,
             ),
             "b (t h w) d -> b t h w d",
@@ -1546,6 +1550,7 @@ class MiniTrainDIT(WeightTrainingStat):
         use_tactile_self_attn_bias: bool = False,
         tactile_self_attn_alpha: float = 2.0,
         tactile_latent_t_indices: Tuple[int, ...] = (4, 5, 10, 11),
+        tactile_latent_gate_groups: Tuple[int, ...] = (),
         tactile_attn_chunk_q: int = 32,
     ) -> None:
         super().__init__()
@@ -1590,6 +1595,7 @@ class MiniTrainDIT(WeightTrainingStat):
         self.use_tactile_self_attn_bias = use_tactile_self_attn_bias
         self.tactile_self_attn_alpha = tactile_self_attn_alpha
         self.tactile_latent_t_indices = tuple(tactile_latent_t_indices)
+        self.tactile_latent_gate_groups = tuple(tactile_latent_gate_groups)
         self.tactile_attn_chunk_q = tactile_attn_chunk_q
 
         self.blocks = nn.ModuleList(
@@ -1786,7 +1792,7 @@ class MiniTrainDIT(WeightTrainingStat):
             or tactile_self_attn_gate_B.numel() == 0
         ):
             return {}
-        _B, T, H, W, _D = x_B_T_H_W_D.shape
+        B, T, H, W, _D = x_B_T_H_W_D.shape
         a_S, b_S = build_tactile_outer_vectors_1d(
             T,
             H,
@@ -1795,13 +1801,55 @@ class MiniTrainDIT(WeightTrainingStat):
             x_B_T_H_W_D.device,
             x_B_T_H_W_D.dtype,
         )
-        gamma_B = self.tactile_self_attn_alpha * tactile_self_attn_gate_B.to(
-            device=x_B_T_H_W_D.device, dtype=x_B_T_H_W_D.dtype
-        )
+        gate = tactile_self_attn_gate_B.to(device=x_B_T_H_W_D.device, dtype=x_B_T_H_W_D.dtype)
+        if gate.ndim <= 1:
+            gamma_B = self.tactile_self_attn_alpha * gate.reshape(-1)
+            return {
+                "tactile_outer_a_S": a_S,
+                "tactile_outer_b_S": b_S,
+                "tactile_gamma_B": gamma_B,
+                "tactile_attn_chunk_q": self.tactile_attn_chunk_q,
+            }
+
+        gate = gate.reshape(gate.shape[0], -1)
+        if gate.shape[0] != B:
+            raise ValueError(f"tactile_self_attn_gate batch {gate.shape[0]} != latent batch {B}")
+
+        groups = self.tactile_latent_gate_groups
+        if not groups:
+            if gate.shape[1] != 1:
+                raise ValueError("Grouped tactile gates require tactile_latent_gate_groups in the net config")
+            gamma_B = self.tactile_self_attn_alpha * gate[:, 0]
+            return {
+                "tactile_outer_a_S": a_S,
+                "tactile_outer_b_S": b_S,
+                "tactile_gamma_B": gamma_B,
+                "tactile_attn_chunk_q": self.tactile_attn_chunk_q,
+            }
+
+        if len(groups) != len(self.tactile_latent_t_indices):
+            raise ValueError(
+                "tactile_latent_gate_groups must match tactile_latent_t_indices length: "
+                f"{len(groups)} != {len(self.tactile_latent_t_indices)}"
+            )
+        max_group = max(groups)
+        if max_group >= gate.shape[1]:
+            raise ValueError(f"tactile gate has {gate.shape[1]} groups, but group {max_group} was requested")
+
+        S = T * H * W
+        stride = H * W
+        gamma_BS = torch.zeros(B, S, device=x_B_T_H_W_D.device, dtype=x_B_T_H_W_D.dtype)
+        for latent_t, group_idx in zip(self.tactile_latent_t_indices, groups):
+            if 0 <= latent_t < T:
+                gamma_BS[:, latent_t * stride : (latent_t + 1) * stride] = (
+                    self.tactile_self_attn_alpha * gate[:, group_idx : group_idx + 1]
+                )
+
         return {
             "tactile_outer_a_S": a_S,
             "tactile_outer_b_S": b_S,
-            "tactile_gamma_B": gamma_B,
+            "tactile_gamma_B": torch.ones(B, device=x_B_T_H_W_D.device, dtype=x_B_T_H_W_D.dtype),
+            "tactile_gamma_BS": gamma_BS,
             "tactile_attn_chunk_q": self.tactile_attn_chunk_q,
         }
 

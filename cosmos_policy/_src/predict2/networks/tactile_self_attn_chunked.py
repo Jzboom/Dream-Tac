@@ -225,6 +225,7 @@ def self_attention_with_tactile_outer_bias_chunked(
     chunk_q: int,
     output_proj: nn.Linear,
     output_dropout: nn.Module,
+    gamma_BS: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Self-attention with additive logits bias: scores_ij += gamma_b * a_i * b_j (batched gamma).
@@ -243,9 +244,14 @@ def self_attention_with_tactile_outer_bias_chunked(
     device = q_B_S_H_D.device
     a = a_S.to(device=device, dtype=dtype)
     b = b_S.to(device=device, dtype=dtype)
-    sqrt_gamma = torch.sqrt(gamma_B.to(device=device, dtype=dtype).clamp(min=0.0)).view(B, 1, 1, 1)
+    if gamma_BS is None:
+        sqrt_gamma = torch.sqrt(gamma_B.to(device=device, dtype=dtype).clamp(min=0.0)).view(B, 1, 1, 1)
+        key_bias_scale = sqrt_gamma * b.view(1, S, 1, 1)
+    else:
+        sqrt_gamma = torch.ones(B, 1, 1, 1, device=device, dtype=dtype)
+        key_bias_scale = gamma_BS.to(device=device, dtype=dtype).clamp(min=0.0).view(B, S, 1, 1)
     q_bias = sqrt_gamma * a.view(1, S, 1, 1).expand(B, S, Hn, 1)
-    k_bias = sqrt_gamma * b.view(1, S, 1, 1).expand(B, S, Hn, 1)
+    k_bias = key_bias_scale.expand(B, S, Hn, 1)
 
     if backend == "flashbias_sdpa":
         out_bshd = _flashbias_sdpa_full(
@@ -264,8 +270,12 @@ def self_attention_with_tactile_outer_bias_chunked(
     k = rearrange(k_B_S_H_D, "b s h d -> b h s d")
     v = rearrange(v_B_S_H_D, "b s h d -> b h s d")
     scale = D**-0.5
-    gamma = gamma_B.to(dtype=q.dtype).view(B, 1, 1, 1)
-    b_row = b.view(1, 1, 1, S)
+    if gamma_BS is None:
+        gamma = gamma_B.to(device=device, dtype=q.dtype).view(B, 1, 1, 1)
+        b_row = b.view(1, 1, 1, S)
+    else:
+        gamma = torch.ones(B, 1, 1, 1, device=device, dtype=q.dtype)
+        b_row = gamma_BS.to(device=device, dtype=q.dtype).view(B, 1, 1, S)
     out = torch.empty_like(q)
 
     for qs in range(0, S, chunk_q):

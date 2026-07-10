@@ -72,6 +72,7 @@ def init_wandb(config: Config, model: ImaginaireModel) -> None:
         force=True,
         id=wandb_id,
         project=config_job.project,
+        entity=getattr(config_job, "wandb_entity", None) or None,
         group=config_job.group,
         name=config_job.name,
         config=config_resolved,

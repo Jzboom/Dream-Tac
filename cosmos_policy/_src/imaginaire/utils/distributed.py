@@ -56,8 +56,14 @@ def init() -> int | None:
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     try:
         device = Device(local_rank)
-        os.sched_setaffinity(0, device.get_cpu_affinity())
-    except pynvml.NVMLError as e:
+        allowed_cpus = set(os.sched_getaffinity(0))
+        device_cpus = set(device.get_cpu_affinity())
+        target_cpus = device_cpus & allowed_cpus
+        if target_cpus:
+            os.sched_setaffinity(0, target_cpus)
+        else:
+            log.warning("Skipping device affinity: NVML CPU set has no overlap with the container CPU set")
+    except (pynvml.NVMLError, OSError) as e:
         log.warning(f"Failed to set device affinity: {e}")
     # Set up NCCL communication.
     os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "0"
