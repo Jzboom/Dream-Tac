@@ -71,18 +71,18 @@ cosmos_predict2_2b_480p_lerobot_earbud_tactile = LazyDict(
                 shuffle=True,
                 seed=0,
             ),
-            batch_size=1,
+            batch_size=8,
             drop_last=True,
         ),
         checkpoint=dict(
-            save_iter=50,
+            save_iter=20000,
         ),
         job=dict(
             project="cosmos_policy_lerobot_earbud",
             group="cosmos_v2_finetune",
             name="cosmos_predict2_2b_480p_lerobot_earbud_tactile",
             wandb_entity=None,
-            wandb_id="lerobot_earbud_tactile",
+            wandb_id=None,
         ),
     )
 )

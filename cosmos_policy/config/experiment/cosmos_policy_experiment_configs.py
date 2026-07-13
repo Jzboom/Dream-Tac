@@ -90,7 +90,7 @@ cosmos_predict2_2b_480p_libero = LazyDict(
             ),
             run_validation=False,
             logging_iter=5,
-            max_iter=1000000,
+            max_iter=100000,
             straggler_detection=dict(
                 enabled=False,
             ),
