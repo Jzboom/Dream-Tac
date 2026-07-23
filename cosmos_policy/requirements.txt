@@ -43,6 +43,8 @@ wandb>=0.22.2
 fastapi>=0.115.0
 uvicorn>=0.34.0
 json-numpy>=1.2.0
+msgpack>=1.0.8
+websockets>=14.0,<16.0
 
 # Text embeddings
 transformers>=4.51.3

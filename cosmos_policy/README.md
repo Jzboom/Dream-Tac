@@ -249,6 +249,30 @@ For faster inference, use the diffusion-step cache model:
 
 ---
 
+## 5. LeRobot-Xense Local Inference Server
+
+The dual-arm earbud checkpoint can be served with the same WebSocket/MsgPack
+contract used by `xense-client`:
+
+```bash
+export DREAMTAC_CKPT=/path/to/checkpoints/iter_XXXXXXXX
+export DREAMTAC_WAN_VAE=/path/to/tokenizer/tokenizer.pth
+export DREAMTAC_STATS=/path/to/dataset_statistics_lerobot_earbud.json
+export DREAMTAC_T5=/path/to/t5_embeddings.pkl
+export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
+
+python -m cosmos_policy.experiments.robot.earbud.earbud_server \
+  --host 0.0.0.0 --port 8000 --num-denoising-steps 5
+```
+
+The request must contain a 20D state, three RGB views, four tactile views, and
+the two-value tactile gate. The default response is an absolute `(20, 20)`
+action chunk compatible with the existing synchronous xense-client broker.
+OpenPI RTC is not supported. See
+`cosmos_policy/experiments/robot/earbud/README.md` for the full protocol.
+
+---
+
 ## Acknowledgements
 
 This project builds upon [Cosmos Policy](https://arxiv.org/abs/2601.16163) (NVIDIA) and [Cosmos Predict2](https://github.com/nvidia-cosmos/cosmos-predict2). The CASA training acceleration uses a self-contained re-implementation of the FlashBias-style attention trick ([FlashBias, NeurIPS 2025](https://arxiv.org/pdf/2505.12044)).
