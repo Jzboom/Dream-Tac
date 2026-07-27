@@ -41,6 +41,11 @@ from cosmos_policy.trainer import CosmosPolicyTrainer as Trainer
 
 @attrs.define(slots=False)
 class ConfigV2(config.Config):
+    # Root-level LeRobot dataset path used by the LeRobot experiment's
+    # OmegaConf interpolations. Declaring it here allows command-line overrides
+    # such as: lerobot_dataset_path=../pick_up_cube_0713
+    lerobot_dataset_path: str = ""
+
     # Here are the default values of config items that will be used unless alternative values are
     # explicitly specified. We copy these as is from other config.py files to prevent runtime errors
     defaults: List[Any] = attrs.field(

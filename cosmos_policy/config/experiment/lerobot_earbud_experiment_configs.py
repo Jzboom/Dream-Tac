@@ -80,7 +80,7 @@ cosmos_predict2_2b_480p_lerobot_earbud_tactile = LazyDict(
             drop_last=True,
         ),
         checkpoint=dict(
-            save_iter=20000,
+            save_iter=10000,
         ),
         job=dict(
             project="cosmos_policy_lerobot_earbud",
