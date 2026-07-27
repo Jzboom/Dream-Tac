@@ -16,8 +16,8 @@ Official implementation of **Dream-Tac**, a unified tactile world action model t
 World action models leverage predictive future observations to guide action generation, but vision alone often fails in contact-rich manipulation where critical cues come from physical interaction. **Dream-Tac** extends world action modeling with tactile sensing and introduces:
 
 1. **Contact-Aware Self-Attention (CASA)** — a gated attention bias that amplifies tactile influence when contact dynamics are salient.
-2. **Contact gate** — computed from frame-to-frame tactile variation (left/right fingertip sensors), suppressing noise while emphasizing contact events.
-3. **Dual-level acceleration** — FlashBias-style fused attention for faster training, and diffusion-step caching for faster inference.
+2. **Contact gate** — computed from frame-to-frame tactile variation, suppressing noise while emphasizing contact events.
+3. **Dual-level acceleration** — FlashBias-style fused attention for faster training and diffusion-step caching for faster inference.
 
 Built on top of [Cosmos Policy](https://arxiv.org/abs/2601.16163), Dream-Tac maps visual and tactile observations into a shared latent space and jointly denoises future images, future tactile frames, and action chunks within one diffusion transformer.
 
@@ -29,35 +29,47 @@ Built on top of [Cosmos Policy](https://arxiv.org/abs/2601.16163), Dream-Tac map
 | Visuo-tactile WAM | 74.2% |
 | **Dream-Tac (visuo-tactile + CASA bias)** | **83.3%** |
 
-Across six real-world Franka tasks, Dream-Tac improves over Cosmos Policy by **+31.6%** average success rate, with up to **2.9×** training speedup and **1.8×** inference speedup.
+Across six real-world contact-rich tasks, Dream-Tac improves over Cosmos Policy by **+31.6%** average success rate, with up to **2.9×** training speedup and **1.8×** inference speedup.
 
 ---
 
 ## Repository structure
 
-```
+```text
 cosmos_policy/
-├── _src/predict2/networks/tactile_self_attn_chunked.py   # CASA + FlashBias-style SDPA backend
-├── utils/tactile_self_attn_gate.py                       # contact gate g_t from tactile frame deltas
-├── datasets/franka_dataset.py                            # visuo-tactile dataset loader
-├── models/policy_video2world_model_openloop_residual_cache.py  # diffusion-step cache (inference)
-├── experiments/robot/openloop_hard_residual_cache.py     # open-loop cache utilities
-├── experiments/robot/franka/                             # preprocessing, open-loop eval, deployment
-├── config/experiment/cosmos_policy_experiment_configs.py # task experiment definitions
-└── scripts/train.py                                      # training entry point
+├── config/local_paths.py                              # default sibling-directory paths
+├── config/experiment/lerobot_earbud_experiment_configs.py
+├── datasets/lerobot_earbud_dataset.py                 # LeRobot-Xense dataset and statistics
+├── datasets/save_lerobot_t5_text_embeddings.py        # task-text embedding generation
+├── _src/predict2/networks/tactile_self_attn_chunked.py
+├── models/policy_video2world_model.py
+├── experiments/robot/earbud/                          # local policy server and protocol
+└── scripts/train.py                                    # training entry point
 ```
 
 ---
 
-## Supported tasks
+## Supported LeRobot layout
 
-Dream-Tac is evaluated on language-conditioned contact-rich manipulation tasks on a Franka Emika Panda with two RealSense cameras and two Xense Photon tactile sensors. Each task has a corresponding experiment config in `cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py`, for example:
+The active training configuration targets a LeRobot v3-style dual-arm dataset with:
 
+- a 20D robot state;
+- a 20D action;
+- three RGB views: head, left wrist, and right wrist;
+- four tactile views: two sensors per arm;
+- task text stored in `meta/tasks.parquet`.
+
+The experiment name is:
+
+```text
+cosmos_predict2_2b_480p_lerobot_earbud_tactile
 ```
-cosmos_predict2_2b_480p_franka_cut_banana_20260321
-```
 
-Ablation configs (e.g. no tactile / no tactile image aug) are also available, such as `cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile`.
+The dataset directory can be changed at launch time with:
+
+```text
+lerobot_dataset_path=../your_lerobot_dataset
+```
 
 ---
 
@@ -66,186 +78,298 @@ Ablation configs (e.g. no tactile / no tactile image aug) are also available, su
 Follow these steps in order:
 
 1. [Environment setup](#1-environment-setup)
-2. [Data preparation](#2-data-preparation)
-3. [Training](#3-training)
-4. [Evaluation (open-loop)](#4-evaluation-open-loop)
+2. [Directory layout](#2-directory-layout)
+3. [LeRobot data preparation](#3-lerobot-data-preparation)
+4. [Training](#4-training)
+5. [Local inference server](#5-local-inference-server)
+
+All commands below are run from the `Dream-Tac` repository root unless stated otherwise.
 
 ---
 
-## 1. Environment Setup
+## 1. Environment setup
 
-Dream-Tac follows the same environment setup as the official [Cosmos Policy](https://github.com/NVlabs/cosmos-policy) release.
+Recommended runtime:
 
-### 1.1 Docker-based setup (recommended)
+- Linux
+- Python 3.10
+- CUDA-enabled PyTorch
+- CUDA 12.8 dependencies for the provided `cu128` extra
 
-Build the Docker image from the repository root:
+### 1.1 Install into an existing virtual environment
+
+```bash
+cd /path/to/Dream-Tac/cosmos_policy
+uv pip install -e ".[cu128]"
+cd ..
+```
+
+### 1.2 Create a project environment with uv
+
+```bash
+cd /path/to/Dream-Tac/cosmos_policy
+uv sync --extra cu128 --python 3.10
+cd ..
+```
+
+### 1.3 Docker
 
 ```bash
 docker build -t dream-tac docker
-```
 
-Launch the container:
-
-```bash
 docker run \
   -u root \
   -e HOST_USER_ID=$(id -u) \
   -e HOST_GROUP_ID=$(id -g) \
-  -v $HOME/.cache:/home/cosmos/.cache \
-  -v $(pwd):/workspace \
+  -v $(pwd)/..:/workspace \
   --gpus all \
   --ipc=host \
   -it \
   --rm \
-  -w /workspace \
+  -w /workspace/Dream-Tac \
   --entrypoint bash \
   dream-tac
 ```
 
-Notes:
-- `--ipc=host` is important for PyTorch data loading stability.
-- If `--ipc=host` is not allowed, use `--shm-size 32g` instead.
-
-### 1.2 Basic setup (inside container or host env)
-
-```bash
-cd /path/to/Dream-Tac
-export PYTHONPATH=$(pwd):$PYTHONPATH
-```
-
-Recommended runtime:
-- Linux
-- Python 3.10
-- CUDA-enabled PyTorch
-
-### 1.3 Dependency installation
-
-From the repository root, using `uv` (recommended):
-
-```bash
-cd cosmos_policy
-uv sync --extra cu128 --group franka
-uv run python -c "import torch; print(torch.__version__)"
-```
+If `--ipc=host` is unavailable, use `--shm-size 32g`.
 
 ### 1.4 Sanity checks
 
 ```bash
+python -c "import torch; print(torch.__version__, torch.cuda.device_count())"
 python -m cosmos_policy.scripts.train --help
-python -m cosmos_policy.datasets.save_franka_t5_text_embeddings --help
-python -m cosmos_policy.experiments.robot.franka.run_franka_openloop --help
+python -m cosmos_policy.datasets.save_lerobot_t5_text_embeddings --help
 ```
 
 ---
 
-## 2. Data Preparation
+## 2. Directory layout
 
-### 2.1 Preprocess raw Franka tactile episodes
+The default configuration derives paths from the repository location. The expected sibling-directory layout is:
 
-Entry point: `cosmos_policy/experiments/robot/franka/preprocess_tactile_franka_data.py`
-
-```bash
-python -m cosmos_policy.experiments.robot.franka.preprocess_tactile_franka_data \
-  --input_dir /path/to/raw_data \
-  --output_dir /path/to/preprocessed_data \
-  --task_name your_task_name
+```text
+workspace/
+├── Dream-Tac/                              # run commands here
+├── pick_up_cube_0713/                      # example LeRobot dataset
+└── checkpoints/
+    ├── Cosmos-Predict2-2B-Video2World/
+    │   ├── model-480p-16fps.pt
+    │   └── tokenizer/
+    │       └── tokenizer.pth
+    ├── google-t5/
+    │   └── t5-11b/
+    └── <training outputs>/
 ```
 
-### 2.2 Generate T5 instruction embeddings (required)
-
-Entry point: `cosmos_policy/datasets/save_franka_t5_text_embeddings.py`
-
-```bash
-python -m cosmos_policy.datasets.save_franka_t5_text_embeddings \
-  --data_dir /path/to/preprocessed_data
-```
-
-Expected artifacts in the processed data directory:
-- `t5_embeddings.pkl`
-- `dataset_statistics_franka.json`
-- `preprocessing_metadata.json`
-- `train/` and `val/` splits
-
-Update the dataset paths in `cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py` to point to your preprocessed data before training.
+Defaults are defined in `cosmos_policy/config/local_paths.py`. Environment variables remain optional overrides, but are not required for the layout above.
 
 ---
 
-## 3. Training
+## 3. LeRobot data preparation
+
+### 3.1 Expected dataset files
+
+```text
+your_lerobot_dataset/
+├── data/
+├── videos/
+├── meta/
+│   ├── info.json
+│   ├── tasks.parquet
+│   └── episodes/
+├── t5_embeddings.pkl
+└── dataset_statistics_lerobot_earbud.json
+```
+
+### 3.2 Generate T5 task embeddings
+
+The task text is read from `meta/tasks.parquet`. Generate embeddings once for each dataset/task-text combination:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python \
+  -m cosmos_policy.datasets.save_lerobot_t5_text_embeddings \
+  --data_dir ../pick_up_cube_0713 \
+  --t5_model_path ../checkpoints/google-t5/t5-11b \
+  --device cuda:0
+```
+
+Output:
+
+```text
+../pick_up_cube_0713/t5_embeddings.pkl
+```
+
+Regenerate this file whenever the exact task text changes.
+
+### 3.3 Generate normalization statistics
+
+Run statistics generation once in a single process before multi-GPU training:
+
+```bash
+python -c 'from cosmos_policy.datasets.lerobot_earbud_dataset import LeRobotEarbudDataset as D; D(data_dir="../pick_up_cube_0713", t5_text_embeddings_path="")'
+```
+
+Output:
+
+```text
+../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json
+```
+
+The statistics use the training defaults:
+
+```text
+chunk_size=20
+gripper_start_idx=18
+normalization_mode=q99
+```
+
+If the statistics file is missing, training can generate it automatically. Pre-generating it avoids every distributed rank computing the same statistics during startup.
+
+### 3.4 Verify required assets
+
+```bash
+ls -lh \
+  ../pick_up_cube_0713/t5_embeddings.pkl \
+  ../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json \
+  ../checkpoints/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt \
+  ../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
+```
+
+---
+
+## 4. Training
 
 | Component | Path |
 |---|---|
 | Training entry | `cosmos_policy/scripts/train.py` |
 | Config router | `cosmos_policy/config/config.py` |
-| Experiment definitions | `cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py` |
+| LeRobot experiment | `cosmos_policy/config/experiment/lerobot_earbud_experiment_configs.py` |
+| Default local paths | `cosmos_policy/config/local_paths.py` |
 
-### 3.1 Multi-GPU training
+### 4.1 Dry-run configuration validation
 
 ```bash
-export MAGINAIRE_OUTPUT_ROOT=/path/to/checkpoints
+python -m cosmos_policy.scripts.train \
+  --config=cosmos_policy/config/config.py \
+  --dryrun -- \
+  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  lerobot_dataset_path=../pick_up_cube_0713 \
+  dataloader_train.batch_size=1 \
+  job.project=cosmos_policy_lerobot_pick_up_cube \
+  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
+```
 
-uv run --extra cu128 --group franka --python 3.10 \
-  torchrun --nproc_per_node=8 --master_port=12341 \
+The dry run writes and prints the resolved `config.yaml` path without starting training.
+
+### 4.2 Single-node multi-GPU training
+
+This example uses eight GPUs and preserves the original global batch size of eight:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+torchrun \
+  --standalone \
+  --nproc_per_node=8 \
   -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
-  experiment="cosmos_predict2_2b_480p_franka_cut_banana_20260321"
+  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  lerobot_dataset_path=../pick_up_cube_0713 \
+  dataloader_train.batch_size=1 \
+  job.project=cosmos_policy_lerobot_pick_up_cube \
+  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
 ```
 
-### 3.2 Dry-run configuration validation
+`--standalone` configures rendezvous automatically for single-node distributed training. The number of visible GPUs must equal `--nproc_per_node`.
 
-```bash
-uv run --extra cu128 --group franka --python 3.10 \
-  python -m cosmos_policy.scripts.train \
-  --config=cosmos_policy/config/config.py --dryrun -- \
-  experiment="cosmos_predict2_2b_480p_franka_cut_banana_20260321"
+### 4.3 Batch-size semantics
+
+`dataloader_train.batch_size` is the per-process batch size:
+
+```text
+global batch size = per-process batch size × number of training processes
 ```
 
-### 3.3 CASA backend selection
+Examples:
 
-Contact-aware self-attention supports three backends (set via environment variable):
+| GPUs | Per-process batch | Global batch |
+|---:|---:|---:|
+| 1 | 8 | 8 |
+| 4 | 2 | 8 |
+| 8 | 1 | 8 |
+| 8 | 8 | 64 |
+
+If changing the global batch size substantially, review the learning rate and scheduler settings.
+
+### 4.4 Dataset and run naming
+
+Change datasets without editing source code:
+
+```text
+lerobot_dataset_path=../another_lerobot_dataset
+```
+
+Use a unique `job.name` for each new task or independent run. Reusing the same output root, `job.project`, `job.group`, and `job.name` allows the checkpointer to resume automatically from `latest_checkpoint.txt`.
+
+The example above writes to:
+
+```text
+../checkpoints/
+└── cosmos_policy_lerobot_pick_up_cube/
+    └── cosmos_v2_finetune/
+        └── pick_up_cube_0713_tactile_8gpu_gbs8_v1/
+            └── checkpoints/
+```
+
+### 4.5 Resume from an explicit distributed checkpoint
 
 ```bash
-export COSMOS_TACTILE_SELF_ATTN_BACKEND=flashbias_sdpa  # default, recommended
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+torchrun \
+  --standalone \
+  --nproc_per_node=8 \
+  -m cosmos_policy.scripts.train \
+  --config=cosmos_policy/config/config.py -- \
+  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  lerobot_dataset_path=../pick_up_cube_0713 \
+  dataloader_train.batch_size=1 \
+  checkpoint.load_path=../checkpoints/path/to/checkpoints/iter_000100000 \
+  checkpoint.load_training_state=true \
+  trainer.max_iter=120000 \
+  job.project=cosmos_policy_lerobot_pick_up_cube \
+  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
+```
+
+`trainer.max_iter` is the final total iteration, not the number of additional iterations.
+
+### 4.6 CASA attention backend
+
+The default and recommended backend is `flashbias_sdpa`. Override it only when debugging:
+
+```bash
+export COSMOS_TACTILE_SELF_ATTN_BACKEND=flashbias_sdpa
 # alternatives: sdpa | eager
 ```
 
-Implementation: `cosmos_policy/_src/predict2/networks/tactile_self_attn_chunked.py`
-
 ---
 
-## 4. Evaluation (Open-Loop)
+## 5. Local inference server
 
-Entry point: `cosmos_policy/experiments/robot/franka/run_franka_openloop.py`
-
-### 4.1 Set runtime paths
+The trained dual-arm policy can be served through the WebSocket/MsgPack interface:
 
 ```bash
-export FRANKA_COSMOS_CONFIG=cosmos_predict2_2b_480p_franka_cut_banana_20260321
-export FRANKA_COSMOS_CKPT=/path/to/checkpoints/iter_000003000
-export FRANKA_DATASET_STATS_PATH=/path/to/preprocessed_data/dataset_statistics_franka.json
-export FRANKA_T5_EMBEDDINGS_PATH=/path/to/preprocessed_data/t5_embeddings.pkl
+export DREAMTAC_CKPT=../checkpoints/path/to/checkpoints/iter_XXXXXXXX
+export DREAMTAC_WAN_VAE=../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
+export DREAMTAC_STATS=../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json
+export DREAMTAC_T5=../pick_up_cube_0713/t5_embeddings.pkl
+export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
+
+python -m cosmos_policy.experiments.robot.earbud.earbud_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --num-denoising-steps 5
 ```
 
-### 4.2 Run open-loop evaluation
-
-```bash
-python -m cosmos_policy.experiments.robot.franka.run_franka_openloop \
-  --hdf5 /path/to/episode_0.hdf5 \
-  --cam_front /path/to/episode_0_cam_front.mp4 \
-  --cam_high /path/to/episode_0_cam_high.mp4 \
-  --tactile_left /path/to/episode_0_tactile_rectify_left.mp4 \
-  --tactile_right /path/to/episode_0_tactile_rectify_right.mp4 \
-  --out_dir ./openloop_out \
-  --future_pred_eval
-```
-
-Typical outputs:
-- action prediction traces
-- future visual / tactile state visualizations
-- JSON summaries (e.g., IoU-style future prediction metrics)
-
-For faster inference, use the diffusion-step cache model:
-- `cosmos_policy/models/policy_video2world_model_openloop_residual_cache.py`
-- `cosmos_policy/experiments/robot/openloop_hard_residual_cache.py`
+Requests contain a 20D state, three RGB views, four tactile views, and a two-value tactile gate. See `cosmos_policy/experiments/robot/earbud/README.md` for the full protocol.
 
 ---
 
