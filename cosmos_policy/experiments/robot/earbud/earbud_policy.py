@@ -2,8 +2,9 @@
 
 The training dataset uses seven RGB/tactile views, a 20-dimensional dual-arm
 state, and one latent action slot containing a 20-step by 20-dimensional action
-chunk.  The first 18 action dimensions are temporal deltas; the two gripper
-dimensions are absolute positions.
+chunk. The first 18 action dimensions are target poses relative to the current
+observation at the start of the chunk; the two gripper dimensions are absolute
+positions.
 """
 
 from __future__ import annotations
@@ -47,7 +48,6 @@ STATE_T = 18
 NUM_CONDITIONAL_FRAMES = 9
 ACTION_LATENT_IDX = 9
 PIXEL_FRAMES = 69
-
 _LATENT_INDICES = {
     "current_proprio_latent_idx": 1,
     "current_image_latent_idx": 2,
@@ -85,7 +85,8 @@ class DreamTacEarbudPolicyConfig:
     center_crop: bool = True
     jpeg_quality: int | None = None
     clip_normalized_actions: bool = True
-    action_output: Literal["absolute_from_state", "temporal_delta"] = "absolute_from_state"
+    action_output: Literal["absolute_from_state", "observation_relative"] = "absolute_from_state"
+    normalization_mode: Literal["q99", "min_max"] = "q99"
     allow_prompt_fallback: bool = False
 
 
@@ -181,11 +182,36 @@ def build_pixel_video(images: Mapping[str, np.ndarray]) -> np.ndarray:
     return np.ascontiguousarray(np.transpose(video_thwc, (3, 0, 1, 2))[None])
 
 
-def normalize_proprio(state: np.ndarray, dataset_stats: Mapping[str, np.ndarray]) -> np.ndarray:
-    low = np.asarray(dataset_stats["proprio_min"], dtype=np.float32)
-    high = np.asarray(dataset_stats["proprio_max"], dtype=np.float32)
+def _normalization_bounds(
+    dataset_stats: Mapping[str, np.ndarray],
+    data_key: str,
+    normalization_mode: Literal["q99", "min_max"],
+) -> tuple[np.ndarray, np.ndarray]:
+    if normalization_mode == "q99":
+        low_suffix, high_suffix = "q01", "q99"
+    elif normalization_mode == "min_max":
+        low_suffix, high_suffix = "min", "max"
+    else:
+        raise ValueError(f"Unsupported normalization mode: {normalization_mode!r}")
+    low = np.asarray(dataset_stats[f"{data_key}_{low_suffix}"], dtype=np.float32)
+    high = np.asarray(dataset_stats[f"{data_key}_{high_suffix}"], dtype=np.float32)
+    return low, high
+
+
+def normalize_proprio(
+    state: np.ndarray,
+    dataset_stats: Mapping[str, np.ndarray],
+    normalization_mode: Literal["q99", "min_max"] = "q99",
+) -> np.ndarray:
+    low, high = _normalization_bounds(dataset_stats, "proprio", normalization_mode)
     if low.shape != (STATE_DIM,) or high.shape != (STATE_DIM,):
         raise ValueError(f"proprio stats must have shape ({STATE_DIM},), got {low.shape} and {high.shape}")
+    if normalization_mode == "q99":
+        valid = (high - low) >= 1e-6
+        normalized = np.zeros_like(state, dtype=np.float32)
+        normalized[valid] = 2.0 * ((state[valid] - low[valid]) / (high[valid] - low[valid])) - 1.0
+        normalized[~valid] = state[~valid]
+        return np.clip(normalized, -1.0, 1.0).astype(np.float32)
     denom = np.where((high - low) < 1e-6, 1.0, high - low)
     return (2.0 * ((state - low) / denom) - 1.0).astype(np.float32)
 
@@ -198,10 +224,10 @@ def project_rotation_6d(
 ) -> np.ndarray:
     """Project two predicted rotation columns onto a valid SO(3) frame.
 
-    Dream-Tac predicts temporal deltas in the ambient 6D representation used
-    during training. Accumulation can move the two columns away from unit and
-    orthogonal constraints, so project them with guarded Gram-Schmidt before
-    returning robot-facing absolute targets.
+    Dream-Tac predicts observation-relative offsets in the ambient 6D
+    representation used during training. Adding the request state can move the
+    two columns away from unit and orthogonal constraints, so project them with
+    guarded Gram-Schmidt before returning robot-facing absolute targets.
     """
     rotation = np.asarray(rotation_6d, dtype=np.float64)
     if rotation.shape != (6,):
@@ -248,32 +274,27 @@ def project_rotation_6d(
     return np.concatenate((first_unit, second_unit)).astype(np.float32)
 
 
-def temporal_delta_to_absolute(delta_actions: np.ndarray, base_state: np.ndarray) -> np.ndarray:
-    """Convert Dream-Tac temporal deltas into robot-ready absolute targets.
-
-    This stateless server-side conversion uses the request state as the base. A
-    production robot client can instead integrate from its last actually sent
-    action and request ``temporal_delta`` output.
-    """
-    delta = np.asarray(delta_actions, dtype=np.float32)
+def observation_relative_to_absolute(relative_actions: np.ndarray, base_state: np.ndarray) -> np.ndarray:
+    """Convert a chunk relative to its request observation into absolute targets."""
+    relative = np.asarray(relative_actions, dtype=np.float32)
     base = np.asarray(base_state, dtype=np.float32)
-    if delta.shape != (CHUNK_SIZE, ACTION_DIM):
-        raise ValueError(f"Expected delta actions {(CHUNK_SIZE, ACTION_DIM)}, got {delta.shape}")
+    if relative.shape != (CHUNK_SIZE, ACTION_DIM):
+        raise ValueError(f"Expected relative actions {(CHUNK_SIZE, ACTION_DIM)}, got {relative.shape}")
     if base.shape != (STATE_DIM,):
         raise ValueError(f"Expected base state ({STATE_DIM},), got {base.shape}")
-    if not np.isfinite(delta).all():
-        raise ValueError("Delta actions contain NaN or Inf")
+    if not np.isfinite(relative).all():
+        raise ValueError("Observation-relative actions contain NaN or Inf")
     if not np.isfinite(base).all():
         raise ValueError("Base state contains NaN or Inf")
-    absolute = delta.copy()
-    absolute[:, :GRIPPER_START_IDX] = base[None, :GRIPPER_START_IDX] + np.cumsum(delta[:, :GRIPPER_START_IDX], axis=0)
+    absolute = relative.copy()
+    absolute[:, :GRIPPER_START_IDX] = base[None, :GRIPPER_START_IDX] + relative[:, :GRIPPER_START_IDX]
     for step_idx in range(CHUNK_SIZE):
         for arm_name, rotation_slice in _ROTATION_6D_SLICES:
             try:
                 absolute[step_idx, rotation_slice] = project_rotation_6d(absolute[step_idx, rotation_slice])
             except ValueError as exc:
                 raise ValueError(f"Invalid {arm_name} 6D rotation at action step {step_idx}: {exc}") from exc
-    absolute[:, GRIPPER_START_IDX:] = np.clip(delta[:, GRIPPER_START_IDX:], 0.0, 1.0)
+    absolute[:, GRIPPER_START_IDX:] = np.clip(relative[:, GRIPPER_START_IDX:], 0.0, 1.0)
     return absolute
 
 
@@ -333,7 +354,7 @@ class DreamTacEarbudPolicy:
         action_space = (
             "absolute_tcp18_absolute_gripper2"
             if self.config.action_output == "absolute_from_state"
-            else "temporal_delta_tcp18_absolute_gripper2"
+            else "observation_relative_tcp18_absolute_gripper2"
         )
         return {
             "service": "dreamtac-earbud",
@@ -342,6 +363,7 @@ class DreamTacEarbudPolicy:
             "action_dim": ACTION_DIM,
             "action_horizon": CHUNK_SIZE,
             "action_space": action_space,
+            "normalization_mode": self.config.normalization_mode,
             "camera_keys": CAMERA_KEYS,
             "image_shape": (self.config.image_size, self.config.image_size, 3),
             "rtc_supported": False,
@@ -354,7 +376,25 @@ class DreamTacEarbudPolicy:
             return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     def _validate_stats(self) -> None:
-        required = ("actions_min", "actions_max", "proprio_min", "proprio_max")
+        stats_chunk_size = self.dataset_stats.get("action_chunk_size")
+        stats_gripper_start_idx = self.dataset_stats.get("gripper_start_idx")
+        if (
+            stats_chunk_size is None
+            or int(np.asarray(stats_chunk_size).item()) != CHUNK_SIZE
+            or stats_gripper_start_idx is None
+            or int(np.asarray(stats_gripper_start_idx).item()) != GRIPPER_START_IDX
+        ):
+            raise ValueError(
+                "Dataset statistics shape metadata do not match this policy: "
+                f"expected chunk/gripper={CHUNK_SIZE}/{GRIPPER_START_IDX}, "
+                f"got {stats_chunk_size!r}/{stats_gripper_start_idx!r}"
+            )
+        if self.config.normalization_mode == "q99":
+            required = ("actions_q01", "actions_q99", "proprio_q01", "proprio_q99")
+        elif self.config.normalization_mode == "min_max":
+            required = ("actions_min", "actions_max", "proprio_min", "proprio_max")
+        else:
+            raise ValueError(f"Unsupported normalization mode: {self.config.normalization_mode!r}")
         missing = [key for key in required if key not in self.dataset_stats]
         if missing:
             raise ValueError(f"Dataset statistics missing keys: {missing}")
@@ -450,7 +490,11 @@ class DreamTacEarbudPolicy:
         prompt = request_prompt or self.config.default_prompt
         if not prompt:
             raise ValueError("No prompt was supplied and default_prompt is empty")
-        normalized_state = normalize_proprio(state, self.dataset_stats)
+        normalized_state = normalize_proprio(
+            state,
+            self.dataset_stats,
+            normalization_mode=self.config.normalization_mode,
+        )
         pixel_video = build_pixel_video(images)
         data_batch = self._build_data_batch(
             pixel_video=pixel_video,
@@ -488,16 +532,20 @@ class DreamTacEarbudPolicy:
         clipped_fraction = float(np.mean(np.abs(normalized_actions_np) > 1.0))
         if self.config.clip_normalized_actions:
             normalized_actions_np = np.clip(normalized_actions_np, -1.0, 1.0)
-        temporal_delta = unnormalize_actions(normalized_actions_np, self.dataset_stats)[0].astype(np.float32)
-        if temporal_delta.shape != (CHUNK_SIZE, ACTION_DIM) or not np.isfinite(temporal_delta).all():
-            raise ValueError(f"Invalid Dream-Tac action output: shape={temporal_delta.shape}")
+        observation_relative = unnormalize_actions(
+            normalized_actions_np,
+            self.dataset_stats,
+            normalization_mode=self.config.normalization_mode,
+        )[0].astype(np.float32)
+        if observation_relative.shape != (CHUNK_SIZE, ACTION_DIM) or not np.isfinite(observation_relative).all():
+            raise ValueError(f"Invalid Dream-Tac action output: shape={observation_relative.shape}")
 
         if self.config.action_output == "absolute_from_state":
-            actions = temporal_delta_to_absolute(temporal_delta, state)
+            actions = observation_relative_to_absolute(observation_relative, state)
             action_space = "absolute_tcp18_absolute_gripper2"
         else:
-            actions = temporal_delta
-            action_space = "temporal_delta_tcp18_absolute_gripper2"
+            actions = observation_relative
+            action_space = "observation_relative_tcp18_absolute_gripper2"
         postprocess_ms = (time.perf_counter() - postprocess_start) * 1000.0
 
         response: dict[str, Any] = {
@@ -511,16 +559,14 @@ class DreamTacEarbudPolicy:
             "normalized_action_clipped_fraction": clipped_fraction,
         }
         if self.config.action_output == "absolute_from_state":
-            response["temporal_delta_actions"] = temporal_delta
+            response["observation_relative_actions"] = observation_relative
         if "observation_seq" in observation:
             response["observation_seq"] = observation["observation_seq"]
         return response
 
     def warmup(self) -> dict[str, Any]:
-        midpoint = 0.5 * (
-            np.asarray(self.dataset_stats["proprio_min"], dtype=np.float32)
-            + np.asarray(self.dataset_stats["proprio_max"], dtype=np.float32)
-        )
+        low, high = _normalization_bounds(self.dataset_stats, "proprio", self.config.normalization_mode)
+        midpoint = 0.5 * (low + high)
         observation = {
             "state": midpoint,
             "images": {

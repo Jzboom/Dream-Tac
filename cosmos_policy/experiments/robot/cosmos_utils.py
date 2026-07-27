@@ -636,7 +636,12 @@ def extract_value_from_latent_sequence(output_latent: torch.Tensor, value_indice
     return final_value
 
 
-def unnormalize_actions(actions: np.ndarray, dataset_stats: dict, scale_multiplier: float = 1.0):
+def unnormalize_actions(
+    actions: np.ndarray,
+    dataset_stats: dict,
+    scale_multiplier: float = 1.0,
+    normalization_mode: str = "q99",
+):
     """
     Unnormalize actions to the original dataset scale.
 
@@ -646,19 +651,26 @@ def unnormalize_actions(actions: np.ndarray, dataset_stats: dict, scale_multipli
         actions (np.ndarray): Actions to be unnormalized
         dataset_stats (dict): Dataset statistics needed for the rescaling formula
         scale_multiplier (float): Multiplier to adjust scale from [-scale_multiplier,+scale_multiplier] back to [-1,+1]
+        normalization_mode (str): ``min_max`` uses min/max; ``q99`` uses q01/q99.
 
     Returns:
         np.ndarray: Unnormalized actions
     """
-    actions_min = dataset_stats["actions_min"]
-    actions_max = dataset_stats["actions_max"]
+    if normalization_mode == "min_max":
+        actions_low = np.asarray(dataset_stats["actions_min"])
+        actions_high = np.asarray(dataset_stats["actions_max"])
+    elif normalization_mode == "q99":
+        actions_low = np.asarray(dataset_stats["actions_q01"])
+        actions_high = np.asarray(dataset_stats["actions_q99"])
+    else:
+        raise ValueError(f"Unsupported normalization mode: {normalization_mode!r}")
     # Reshape actions from (B, chunk_size, action_dim) to (B * chunk_size, action_dim)
     original_shape = actions.shape
-    actions = actions.reshape(-1, actions_min.shape[0])
+    actions = actions.reshape(-1, actions_low.shape[0])
     # First, undo the scale_multiplier scaling
     actions = actions / scale_multiplier
-    # Then, scale back to original data scale: x_new = 0.5 * (x + 1) * (x_max - x_min) + x_min
-    actions = 0.5 * (actions + 1) * (actions_max - actions_min) + actions_min
+    # Then, scale back to original data scale: x_new = 0.5 * (x + 1) * (high - low) + low
+    actions = 0.5 * (actions + 1) * (actions_high - actions_low) + actions_low
     # Reshape actions back to (B, chunk_size, action_dim)
     actions = actions.reshape(original_shape)
     return actions

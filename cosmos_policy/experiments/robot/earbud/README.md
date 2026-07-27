@@ -33,16 +33,17 @@ The default response contains robot-ready absolute actions:
 ```python
 {
     "actions": np.ndarray((20, 20), dtype=np.float32),
-    "temporal_delta_actions": np.ndarray((20, 20), dtype=np.float32),
+    "observation_relative_actions": np.ndarray((20, 20), dtype=np.float32),
     "action_space": "absolute_tcp18_absolute_gripper2",
     "server_timing": {...},
 }
 ```
 
-The server-side absolute conversion integrates the TCP deltas from the request
-state. For production control that integrates from the last action actually
-sent by the robot, start the server with `--action-output temporal_delta` and
-use a Dream-Tac-aware robot-side integrator.
+For a chunk starting at `t`, every TCP target is represented relative to the
+same request state: `relative[k] = action[t+k] - observation.state[t]`. The
+server converts it back with a direct addition, without cumulative summation.
+Gripper targets remain absolute. Use `--action-output observation_relative` to
+return this raw representation instead of robot-ready absolute targets.
 
 OpenPI RTC is not supported. Use a synchronous `ActionChunkBroker` with
 `action_horizon=20` for the first deployment.
@@ -55,12 +56,22 @@ export DREAMTAC_WAN_VAE=/path/to/tokenizer/tokenizer.pth
 export DREAMTAC_STATS=/path/to/dataset_statistics_lerobot_earbud.json
 export DREAMTAC_T5=/path/to/t5_embeddings.pkl
 export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
+export DREAMTAC_NORMALIZATION_MODE=q99
 
 python -m cosmos_policy.experiments.robot.earbud.earbud_server \
   --host 0.0.0.0 \
   --port 8000 \
   --num-denoising-steps 5
 ```
+
+New checkpoints use per-dimension q01/q99 normalization for observation-relative
+action chunks and proprio, with clipping to `[-1, 1]`. The statistics JSON must
+contain `action_chunk_size=20`, `gripper_start_idx=18`, `actions_q01`,
+`actions_q99`, `proprio_q01`, and `proprio_q99`. The action statistics are
+computed after every absolute chunk has been shifted by its starting
+observation. Use
+`DREAMTAC_NORMALIZATION_MODE=min_max` only for a checkpoint trained with min/max
+statistics using the same action representation.
 
 The server validates `state_t=18`, nine conditional slots, 69 tokenizer pixel
 frames, statistics shapes, prompt cache membership, request shapes, and finite

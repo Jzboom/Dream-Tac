@@ -21,15 +21,13 @@ import logging
 import os
 import time
 import traceback
-from typing import Any
 
 import websockets
 import websockets.asyncio.server as websocket_server
 import websockets.frames
 
 from cosmos_policy.experiments.robot.earbud import msgpack_numpy
-from cosmos_policy.experiments.robot.earbud.earbud_policy import DreamTacEarbudPolicy
-from cosmos_policy.experiments.robot.earbud.earbud_policy import DreamTacEarbudPolicyConfig
+from cosmos_policy.experiments.robot.earbud.earbud_policy import DreamTacEarbudPolicy, DreamTacEarbudPolicyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +124,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=int(os.environ.get("DREAMTAC_SEED", "0")))
     parser.add_argument(
         "--action-output",
-        choices=("absolute_from_state", "temporal_delta"),
+        choices=("absolute_from_state", "observation_relative"),
         default=os.environ.get("DREAMTAC_ACTION_OUTPUT", "absolute_from_state"),
         help=(
             "absolute_from_state is compatible with the existing xense-openpi ActionChunkBroker; "
-            "temporal_delta requires a Dream-Tac-aware robot-side integrator"
+            "observation_relative returns the raw chunk relative to the request state"
         ),
+    )
+    parser.add_argument(
+        "--normalization-mode",
+        choices=("q99", "min_max"),
+        default=os.environ.get("DREAMTAC_NORMALIZATION_MODE", "q99"),
+        help="Must match the normalization used to train the checkpoint.",
     )
     parser.add_argument("--jpeg-quality", type=int, default=None)
     parser.add_argument("--center-crop", action=argparse.BooleanOptionalAction, default=True)
@@ -165,6 +169,7 @@ def main(argv: list[str] | None = None) -> None:
         jpeg_quality=args.jpeg_quality,
         clip_normalized_actions=args.clip_normalized_actions,
         action_output=args.action_output,
+        normalization_mode=args.normalization_mode,
         allow_prompt_fallback=args.allow_prompt_fallback,
     )
 
@@ -180,11 +185,7 @@ def main(argv: list[str] | None = None) -> None:
             warmup_result.get("server_timing"),
         )
 
-    asyncio.run(
-        DreamTacWebsocketServer(
-            policy, host=args.host, port=args.port
-            ).run()
-        )
+    asyncio.run(DreamTacWebsocketServer(policy, host=args.host, port=args.port).run())
 
 
 if __name__ == "__main__":

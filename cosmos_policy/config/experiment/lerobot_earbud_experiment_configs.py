@@ -26,6 +26,7 @@ lerobot_earbud_dataset = L(LeRobotEarbudDataset)(
     normalize_images=False,
     normalize_actions=True,
     normalize_proprio=True,
+    normalization_mode="q99",
     use_image_aug=True,
     use_stronger_image_aug=True,
     use_proprio=True,
