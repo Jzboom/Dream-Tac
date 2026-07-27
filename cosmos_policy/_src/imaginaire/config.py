@@ -41,6 +41,7 @@ from cosmos_policy._src.imaginaire.lazy_config import LazyDict
 from cosmos_policy._src.imaginaire.serialization import from_yaml, load_callable
 from cosmos_policy._src.imaginaire.utils import callback, distributed
 from cosmos_policy._src.imaginaire.utils.misc import Color
+from cosmos_policy.config.local_paths import DEFAULT_CHECKPOINT_ROOT
 
 T = TypeVar("T")
 
@@ -204,8 +205,8 @@ class JobConfig:
 
     @property
     def path_local(self) -> str:
-        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints")
-        return f"{local_root}/{self.path}"
+        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", str(DEFAULT_CHECKPOINT_ROOT))
+        return os.path.join(local_root, self.path)
 
 
 @make_freezable

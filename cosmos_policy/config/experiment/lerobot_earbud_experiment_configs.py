@@ -10,17 +10,18 @@ from torch.utils.data import DataLoader, DistributedSampler
 from cosmos_policy._src.imaginaire.lazy_config import LazyCall as L
 from cosmos_policy._src.imaginaire.lazy_config import LazyDict
 from cosmos_policy._src.imaginaire.utils import log
+from cosmos_policy.config.local_paths import DEFAULT_LEROBOT_DATA_DIR
 from cosmos_policy.datasets.lerobot_earbud_dataset import LeRobotEarbudDataset
 from cosmos_policy.models.policy_video2world_model import CosmosPolicyVideo2WorldModel
 
 _LEROBOT_EARBUD_DATA_DIR = os.environ.get(
     "LEROBOT_EARBUD_DATA_DIR",
-    "/data/earbud_case_sequential_insertion_teleop/jhn/earbud_case_insertion_teleop_0515",
+    str(DEFAULT_LEROBOT_DATA_DIR),
 )
 
 lerobot_earbud_dataset = L(LeRobotEarbudDataset)(
-    data_dir=_LEROBOT_EARBUD_DATA_DIR,
-    t5_text_embeddings_path=os.path.join(_LEROBOT_EARBUD_DATA_DIR, "t5_embeddings.pkl"),
+    data_dir="${lerobot_dataset_path}",
+    t5_text_embeddings_path="${lerobot_dataset_path}/t5_embeddings.pkl",
     chunk_size=20,
     final_image_size=224,
     normalize_images=False,
@@ -43,6 +44,9 @@ cosmos_predict2_2b_480p_lerobot_earbud_tactile = LazyDict(
             "/experiment/cosmos_predict2_2b_480p_libero",
             "_self_",
         ],
+        # Override from the training command with, for example:
+        # lerobot_dataset_path=../another_lerobot_dataset
+        lerobot_dataset_path=_LEROBOT_EARBUD_DATA_DIR,
         model=L(CosmosPolicyVideo2WorldModel)(
             config=dict(
                 state_t=18,

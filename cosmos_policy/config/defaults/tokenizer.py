@@ -22,13 +22,14 @@ import os
 from hydra.core.config_store import ConfigStore
 
 from cosmos_policy._src.imaginaire.lazy_config import LazyCall as L
+from cosmos_policy.config.local_paths import DEFAULT_WAN_VAE
 from cosmos_policy.policy_tokenizers.wan2pt1 import Wan2pt1VAEInterface
 
 # Policy-specific wan2pt1 tokenizer with deterministic seeding
 PolicyWan2pt1VAEConfig = L(Wan2pt1VAEInterface)(
     vae_pth=os.environ.get(
         "DREAMTAC_WAN_VAE",
-        "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth",
+        str(DEFAULT_WAN_VAE),
     ),
     s3_credential_path="credentials/s3_training.secret",
     load_mean_std=False,
