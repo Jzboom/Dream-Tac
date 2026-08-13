@@ -97,6 +97,43 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
         super().__init__(config)
         self.config: CosmosPolicyVideo2WorldConfig = config
 
+    @staticmethod
+    def _attach_tactile_self_attn_gate(
+        condition: Text2WorldCondition,
+        tactile_self_attn_gate: Any,
+        *,
+        device: torch.device,
+    ) -> Text2WorldCondition:
+        """Copy an input tactile gate onto a video condition.
+
+        The tactile gate is an inference/training input rather than a conditioner
+        embedding.  It therefore has to be copied after the conditioner creates
+        the condition.  Keeping this operation separate also covers autoregressive
+        inference, where VAE encoding is skipped and ``get_data_and_condition`` is
+        not called.
+
+        Only the mutable Video2World condition supports this field.  Other model
+        conditions are returned unchanged so non-tactile paths keep their existing
+        behavior.
+        """
+        if tactile_self_attn_gate is None or not isinstance(condition, Video2WorldCondition):
+            return condition
+
+        if isinstance(tactile_self_attn_gate, torch.Tensor):
+            gate = tactile_self_attn_gate.to(device=device, dtype=torch.float32)
+        else:
+            gate = torch.as_tensor(tactile_self_attn_gate, device=device, dtype=torch.float32)
+        if gate.ndim == 0:
+            gate = gate.reshape(1)
+        elif gate.ndim == 1:
+            gate = gate.reshape(-1)
+        else:
+            gate = gate.reshape(gate.shape[0], -1)
+
+        kwargs = condition.to_dict(skip_underscore=False)
+        kwargs["tactile_self_attn_gate_B"] = gate
+        return type(condition)(**kwargs)
+
     def get_data_and_condition(
         self, data_batch: dict[str, torch.Tensor]
     ) -> Tuple[Tensor, Tensor, Video2WorldCondition]:
@@ -390,21 +427,11 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
             )
 
         # Tactile self-attn gate: from dataloader, shape (B,) or grouped shape (B, G).
-        if "tactile_self_attn_gate" in data_batch:
-            tg = data_batch["tactile_self_attn_gate"]
-            if not isinstance(tg, torch.Tensor):
-                tg = torch.as_tensor(tg, dtype=torch.float32, device=latent_state.device)
-            else:
-                tg = tg.to(device=latent_state.device, dtype=torch.float32)
-            if tg.ndim == 0:
-                tg = tg.reshape(1)
-            elif tg.ndim == 1:
-                tg = tg.reshape(-1)
-            else:
-                tg = tg.reshape(tg.shape[0], -1)
-            kw = condition.to_dict(skip_underscore=False)
-            kw["tactile_self_attn_gate_B"] = tg
-            condition = type(condition)(**kw)
+        condition = self._attach_tactile_self_attn_gate(
+            condition,
+            data_batch.get("tactile_self_attn_gate"),
+            device=latent_state.device,
+        )
 
         return raw_state, latent_state, condition
 
@@ -755,6 +782,21 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 condition.condition_video_input_mask_B_C_T_H_W[
                     batch_indices, :, data_batch["future_image2_latent_idx"], :, :
                 ] = 0
+
+        # The conditioner does not produce the tactile gate.  Attach it after all
+        # inference condition edits so the field survives both normal and
+        # skip_vae_encoding/autoregressive sampling paths.
+        condition = self._attach_tactile_self_attn_gate(
+            condition,
+            data_batch.get("tactile_self_attn_gate"),
+            device=x0.device,
+        )
+        if uncondition is not None:
+            uncondition = self._attach_tactile_self_attn_gate(
+                uncondition,
+                data_batch.get("tactile_self_attn_gate"),
+                device=x0.device,
+            )
 
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
         if uncondition is not None:
