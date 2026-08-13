@@ -92,10 +92,34 @@ cosmos_predict2_2b_480p_lerobot_earbud_tactile = LazyDict(
     )
 )
 
+cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_lerobot_earbud_tactile",
+            "_self_",
+        ],
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                sde=dict(
+                    sigma_max=40,
+                    sigma_min=8,
+                ),
+            ),
+        ),
+        job=dict(
+            group="cosmos_v2_inference",
+            name="cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only",
+        ),
+    )
+)
+
 
 def _register_configs() -> None:
     cs = ConfigStore.instance()
-    for item in [cosmos_predict2_2b_480p_lerobot_earbud_tactile]:
+    for item in [
+        cosmos_predict2_2b_480p_lerobot_earbud_tactile,
+        cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only,
+    ]:
         experiment_name = item["job"]["name"]
         log.info(f"Registering experiment: {experiment_name}")
         cs.store(group="experiment", package="_global_", name=experiment_name, node=item)
