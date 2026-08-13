@@ -294,6 +294,7 @@ def get_model(cfg):
         s3_checkpoint_dir=checkpoint_path,
         config_file=cfg.config_file,
         load_ema_to_reg=False,
+        experiment_opts=getattr(cfg, "experiment_opts", None),
     )
     model.eval()
     model = model.to(DEVICE)

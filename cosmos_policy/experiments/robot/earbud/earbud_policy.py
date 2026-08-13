@@ -76,7 +76,7 @@ class DreamTacEarbudPolicyConfig:
     dataset_stats_path: str
     t5_embeddings_path: str
     default_prompt: str
-    config_name: str = "cosmos_predict2_2b_480p_lerobot_earbud_tactile"
+    config_name: str = "cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only"
     config_file: str = "cosmos_policy/config/config.py"
     wan_vae_path: str | None = None
     num_denoising_steps: int = 5
@@ -312,8 +312,13 @@ class DreamTacEarbudPolicy:
         self.config = config
         if config.image_size != IMAGE_SIZE:
             raise ValueError(f"The trained earbud policy requires image_size={IMAGE_SIZE}, got {config.image_size}")
+        experiment_opts: list[str] = []
         if config.wan_vae_path:
-            os.environ["DREAMTAC_WAN_VAE"] = config.wan_vae_path
+            wan_vae_path = os.path.abspath(os.path.expanduser(config.wan_vae_path))
+            if not os.path.exists(wan_vae_path):
+                raise FileNotFoundError(f"WAN VAE checkpoint does not exist: {wan_vae_path}")
+            os.environ["DREAMTAC_WAN_VAE"] = wan_vae_path
+            experiment_opts.append(f"model.config.tokenizer.vae_pth={wan_vae_path}")
 
         if not torch.cuda.is_available() and model is None:
             raise RuntimeError("Dream-Tac local inference requires a CUDA GPU")
@@ -323,6 +328,7 @@ class DreamTacEarbudPolicy:
                 config=config.config_name,
                 ckpt_path=config.checkpoint_path,
                 config_file=config.config_file,
+                experiment_opts=experiment_opts,
             )
             self.model, self.cosmos_config = get_model(load_cfg)
         else:

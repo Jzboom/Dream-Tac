@@ -106,7 +106,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.environ.get("DREAMTAC_PORT", "8000")))
     parser.add_argument(
         "--config",
-        default=os.environ.get("DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_earbud_tactile"),
+        default=os.environ.get(
+            "DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only"
+        ),
     )
     parser.add_argument(
         "--config-file", default=os.environ.get("DREAMTAC_CONFIG_FILE", "cosmos_policy/config/config.py")

@@ -51,17 +51,16 @@ OpenPI RTC is not supported. Use a synchronous `ActionChunkBroker` with
 ## Start the server
 
 ```bash
-export DREAMTAC_CKPT=/path/to/checkpoints/iter_XXXXXXXX
-export DREAMTAC_WAN_VAE=/path/to/tokenizer/tokenizer.pth
-export DREAMTAC_STATS=/path/to/dataset_statistics_lerobot_earbud.json
-export DREAMTAC_T5=/path/to/t5_embeddings.pkl
-export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
-export DREAMTAC_NORMALIZATION_MODE=q99
+export DREAMTAC_CKPT=/home/p3/data_sda1/checkpoints_haonan/0806_256batch_130_episode_test_tube/checkpoints/iter_000030000
+export DREAMTAC_WAN_VAE=/home/p3/data_sda1/checkpoints_haonan/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
+export DREAMTAC_STATS=/home/p3/data_sda1/checkpoints_haonan/test_tube_0729_0808_160_temp/dataset_statistics_lerobot_earbud.json
+export DREAMTAC_T5=/home/p3/data_sda1/checkpoints_haonan/test_tube_0729_0808_160_temp/t5_embeddings.pkl
+export DREAMTAC_DEFAULT_PROMPT='Invert the test tube, pick up the pipette, mount the tip to pipette, aspirate from beaker and dispense into the tube, eject the tip, return the pipette, and cap with the stopper.'
 
 python -m cosmos_policy.experiments.robot.earbud.earbud_server \
   --host 0.0.0.0 \
   --port 8000 \
-  --num-denoising-steps 5
+  --num-denoising-steps 1
 ```
 
 New checkpoints use per-dimension q01/q99 normalization for observation-relative

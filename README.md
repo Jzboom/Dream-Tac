@@ -364,6 +364,7 @@ export DREAMTAC_T5=../pick_up_cube_0713/t5_embeddings.pkl
 export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
 
 python -m cosmos_policy.experiments.robot.earbud.earbud_server \
+  --config cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only
   --host 0.0.0.0 \
   --port 8000 \
   --num-denoising-steps 5
