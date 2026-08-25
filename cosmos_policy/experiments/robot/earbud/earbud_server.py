@@ -37,6 +37,7 @@ class DreamTacWebsocketServer:
         self.policy = policy
         self.host = host
         self.port = port
+        self._request_count = 0
 
     async def _handler(self, websocket: websocket_server.ServerConnection) -> None:
         logger.info("Connection from %s opened", websocket.remote_address)
@@ -45,11 +46,25 @@ class DreamTacWebsocketServer:
 
         previous_total_ms: float | None = None
         while True:
+            request_id: int | None = None
+            request_start: float | None = None
             try:
-                request_start = time.perf_counter()
                 message = await websocket.recv()
                 if isinstance(message, str):
                     raise ValueError("Inference requests must be binary MsgPack frames")
+
+                # Start after recv() so time spent waiting for the robot's next
+                # observation is not reported as server inference latency.
+                request_start = time.perf_counter()
+                self._request_count += 1
+                request_id = self._request_count
+                logger.info(
+                    "Inference request #%d started: client=%s request_bytes=%d",
+                    request_id,
+                    websocket.remote_address,
+                    len(message),
+                )
+
                 observation = msgpack_numpy.unpackb(message)
                 if not isinstance(observation, dict):
                     raise ValueError(f"Observation must be a dictionary, got {type(observation).__name__}")
@@ -63,14 +78,45 @@ class DreamTacWebsocketServer:
                 if previous_total_ms is not None:
                     timing["prev_total_ms"] = previous_total_ms
                 response["server_timing"] = timing
-                await websocket.send(packer.pack(response))
+
+                pack_start = time.perf_counter()
+                packed_response = packer.pack(response)
+                pack_ms = (time.perf_counter() - pack_start) * 1000.0
+                send_start = time.perf_counter()
+                await websocket.send(packed_response)
+                send_ms = (time.perf_counter() - send_start) * 1000.0
                 previous_total_ms = (time.perf_counter() - request_start) * 1000.0
+                logger.info(
+                    "Inference request #%d complete: client=%s actions=%s "
+                    "preprocess=%.1f ms vae+denoise=%.1f ms postprocess=%.1f ms "
+                    "policy_total=%.1f ms pack=%.1f ms send=%.1f ms server_total=%.1f ms "
+                    "clipped=%.2f%%",
+                    request_id,
+                    websocket.remote_address,
+                    getattr(response.get("actions"), "shape", None),
+                    float(timing.get("preprocess_ms", 0.0)),
+                    float(timing.get("vae_and_denoise_ms", 0.0)),
+                    float(timing.get("postprocess_ms", 0.0)),
+                    float(timing.get("policy_total_ms", infer_ms)),
+                    pack_ms,
+                    send_ms,
+                    previous_total_ms,
+                    100.0 * float(response.get("normalized_action_clipped_fraction", 0.0)),
+                )
             except websockets.ConnectionClosed:
                 logger.info("Connection from %s closed", websocket.remote_address)
                 break
             except Exception:
                 error_message = traceback.format_exc()
-                logger.error("Inference request failed:\n%s", error_message)
+                elapsed_ms = (
+                    (time.perf_counter() - request_start) * 1000.0 if request_start is not None else 0.0
+                )
+                logger.error(
+                    "Inference request #%s failed after %.1f ms:\n%s",
+                    request_id if request_id is not None else "unknown",
+                    elapsed_ms,
+                    error_message,
+                )
                 await websocket.send(error_message)
                 await websocket.close(
                     code=websockets.frames.CloseCode.INTERNAL_ERROR,
@@ -175,16 +221,31 @@ def main(argv: list[str] | None = None) -> None:
         allow_prompt_fallback=args.allow_prompt_fallback,
     )
 
-    logger.info("Loading Dream-Tac policy from %s", config.checkpoint_path)
+    logger.info(
+        "Loading Dream-Tac policy from %s (denoising_steps=%d, action_output=%s)",
+        config.checkpoint_path,
+        config.num_denoising_steps,
+        config.action_output,
+    )
+    load_start = time.perf_counter()
     policy = DreamTacEarbudPolicy(config)
+    logger.info("Dream-Tac policy loaded in %.2f s", time.perf_counter() - load_start)
     logger.info("Policy metadata: %s", policy.metadata)
     if args.warmup:
         logger.info("Running fixed-shape warm-up inference")
+        warmup_start = time.perf_counter()
         warmup_result = policy.warmup()
+        warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
+        warmup_timing = warmup_result.get("server_timing", {})
         logger.info(
-            "Warm-up complete: actions=%s timing=%s",
+            "Warm-up complete: actions=%s preprocess=%.1f ms vae+denoise=%.1f ms "
+            "postprocess=%.1f ms policy_total=%.1f ms wall=%.1f ms",
             warmup_result["actions"].shape,
-            warmup_result.get("server_timing"),
+            float(warmup_timing.get("preprocess_ms", 0.0)),
+            float(warmup_timing.get("vae_and_denoise_ms", 0.0)),
+            float(warmup_timing.get("postprocess_ms", 0.0)),
+            float(warmup_timing.get("policy_total_ms", warmup_ms)),
+            warmup_ms,
         )
 
     asyncio.run(DreamTacWebsocketServer(policy, host=args.host, port=args.port).run())

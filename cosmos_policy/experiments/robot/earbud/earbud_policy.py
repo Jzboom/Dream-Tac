@@ -164,7 +164,9 @@ def validate_and_prepare_observation(
         jpeg_quality=jpeg_quality,
     )
 
-    gate = np.asarray(observation.get("tactile_self_attn_gate"), dtype=np.float32)
+    # MsgPack decodes ndarray payloads as read-only buffer views.  torch.from_numpy
+    # requires writable storage even though inference only reads this tensor.
+    gate = np.array(observation.get("tactile_self_attn_gate"), dtype=np.float32, copy=True)
     if gate.shape != (2,):
         raise ValueError(f"tactile_self_attn_gate must have shape (2,), got {gate.shape}")
     if not np.isfinite(gate).all():
@@ -556,6 +558,7 @@ class DreamTacEarbudPolicy:
                 "Dream-Tac does not support OpenPI RTC kwargs. Disable --rtc-enabled on the robot client."
             )
 
+        infer_start = time.perf_counter()
         preprocess_start = time.perf_counter()
         state, images, tactile_gate, request_prompt = validate_and_prepare_observation(
             observation,
@@ -578,9 +581,12 @@ class DreamTacEarbudPolicy:
             tactile_gate=tactile_gate,
             prompt=prompt,
         )
+        # Tensor transfers in _build_data_batch may be asynchronous.  Synchronize
+        # here so their cost is attributed to preprocessing instead of vanishing
+        # between the preprocessing and sampling timers.
+        self._synchronize()
         preprocess_ms = (time.perf_counter() - preprocess_start) * 1000.0
 
-        self._synchronize()
         sampling_start = time.perf_counter()
         with torch.inference_mode():
             generated_result = self.model.generate_samples_from_batch(
@@ -627,25 +633,35 @@ class DreamTacEarbudPolicy:
             action_space = "observation_relative_tcp18_absolute_gripper2"
 
         future_images: dict[str, np.ndarray] | None = None
+        future_decode_ms = 0.0
         if self.config.decode_future_images:
             if orig_clean_latent_frames is None:
                 raise RuntimeError("Model did not return clean latent frames required for future image decoding")
+            future_decode_start = time.perf_counter()
             with torch.inference_mode():
                 future_images = decode_future_images(
                     self.model,
                     generated,
                     orig_clean_latent_frames,
                 )
+            self._synchronize()
+            future_decode_ms = (time.perf_counter() - future_decode_start) * 1000.0
         postprocess_ms = (time.perf_counter() - postprocess_start) * 1000.0
+        policy_total_ms = (time.perf_counter() - infer_start) * 1000.0
+
+        timing = {
+            "preprocess_ms": preprocess_ms,
+            "vae_and_denoise_ms": sampling_ms,
+            "postprocess_ms": postprocess_ms,
+            "policy_total_ms": policy_total_ms,
+        }
+        if self.config.decode_future_images:
+            timing["future_decode_ms"] = future_decode_ms
 
         response: dict[str, Any] = {
             "actions": np.ascontiguousarray(actions, dtype=np.float32),
             "action_space": action_space,
-            "server_timing": {
-                "preprocess_ms": preprocess_ms,
-                "vae_and_denoise_ms": sampling_ms,
-                "postprocess_ms": postprocess_ms,
-            },
+            "server_timing": timing,
             "normalized_action_clipped_fraction": clipped_fraction,
         }
         if self.config.action_output == "absolute_from_state":
