@@ -690,9 +690,9 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
             )
 
-        # NOTE (user):
-        # The original gt_frames latent is useful for decoding latents to images without distortions caused by the latent injections below
-        condition.orig_gt_frames = condition.gt_frames.clone()  # Keep a backup of the original gt_frames
+        # Keep visualization-only state local to sampling so the conditioner,
+        # training path, and context-parallel broadcast schema remain unchanged.
+        orig_clean_latent_frames = condition.gt_frames.clone() if return_orig_clean_latent_frames else None
 
         B = condition.condition_video_input_mask_B_C_T_H_W.shape[0]
 
@@ -830,7 +830,7 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
             return raw_x0
 
         if return_orig_clean_latent_frames:
-            return x0_fn, condition.orig_gt_frames
+            return x0_fn, orig_clean_latent_frames
         else:
             return x0_fn
 

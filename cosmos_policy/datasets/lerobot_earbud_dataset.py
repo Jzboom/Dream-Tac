@@ -331,6 +331,58 @@ class LeRobotEarbudDataset(Dataset):
             "tactile_self_attn_gate": torch.tensor([left_gate, right_gate], dtype=torch.float32),
         }
 
+    def get_inference_sample(self, episode_index: int, relative_step_idx: int) -> dict[str, Any]:
+        """Return one raw online-style observation and its future-frame GT.
+
+        ``episode_index`` is the LeRobot episode id from metadata, not its list
+        position. Images remain RGB uint8 at their stored resolution; the policy
+        applies the same resize/crop path used by the online server.
+        """
+        episode = next((item for item in self.episodes if item.episode_index == episode_index), None)
+        if episode is None:
+            available = [item.episode_index for item in self.episodes[:20]]
+            raise KeyError(f"Episode {episode_index} was not found. First available ids: {available}")
+        if not 0 <= relative_step_idx < episode.length:
+            raise IndexError(
+                f"relative_step_idx {relative_step_idx} is outside episode {episode_index} length {episode.length}"
+            )
+
+        _, raw_proprio = self._get_episode_arrays(episode)
+        future_step_idx = min(relative_step_idx + self.chunk_size, episode.length - 1)
+        current_frames = {key: self._read_frame(episode, key, relative_step_idx) for key in self.VIDEO_KEYS}
+        future_frames = {key: self._read_frame(episode, key, future_step_idx) for key in self.VIDEO_KEYS}
+        left_gate, right_gate = self._compute_per_arm_tactile_gate(episode, relative_step_idx, current_frames)
+
+        def _short_names(frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+            return {key.removeprefix("observation.images."): value for key, value in frames.items()}
+
+        return {
+            "observation": {
+                "observation_seq": relative_step_idx,
+                "state": np.ascontiguousarray(raw_proprio[relative_step_idx], dtype=np.float32),
+                "images": _short_names(current_frames),
+                "tactile_self_attn_gate": np.asarray([left_gate, right_gate], dtype=np.float32),
+                "prompt": episode.command,
+            },
+            "future_images": _short_names(future_frames),
+            "episode_index": episode.episode_index,
+            "start_timestep": relative_step_idx,
+            "future_timestep": future_step_idx,
+            "is_padded_future": future_step_idx != relative_step_idx + self.chunk_size,
+        }
+
+    def close(self) -> None:
+        """Release cached OpenCV video handles."""
+        for capture in self._video_capture_cache.values():
+            capture.release()
+        self._video_capture_cache.clear()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _load_info(self) -> dict[str, Any]:
         path = os.path.join(self.data_dir, "meta", "info.json")
         with open(path) as f:

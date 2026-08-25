@@ -63,6 +63,43 @@ python -m cosmos_policy.experiments.robot.earbud.earbud_server \
   --num-denoising-steps 1
 ```
 
+## Future-image prediction vs GT
+
+Offline evaluation can decode all seven predicted future slots (head, two
+wrists, and four tactile views) with the WAN VAE. The online WebSocket server
+does not decode or save future images, so its inference latency is unchanged.
+
+Before offline decoding, only the non-image slots 0/1/9/10 are restored from the
+clean placeholder latent sequence so that proprio/action injections do not
+create temporal VAE artifacts. Predicted future slots 11 through 17 are never
+restored or replaced; they remain the model predictions being evaluated.
+
+For offline evaluation on a LeRobot episode:
+
+```bash
+python -m cosmos_policy.experiments.robot.earbud.offline_future_image_eval \
+  --data-dir /path/to/lerobot_dataset \
+  --episode-index 0 \
+  --start 0 \
+  --stride 20 \
+  --num-denoising-steps 5 \
+  --output-dir ./earbud_future_comparisons
+```
+
+The script uses the same environment variables as the server. For every start
+at `t`, it compares the decoded prediction with the dataset frame at `t+20`.
+Starts whose target would be clamped to the last episode frame are skipped by
+default; pass `--include-padded-future` to include them.
+
+`--num-denoising-steps` directly controls the diffusion sampler. Its precedence
+is command-line value, then `DREAMTAC_NUM_DENOISING_STEPS`, then fallback `5`.
+The selected value and seed are printed at startup and included in each output
+filename as `_stepsNNN_seedN`.
+
+The only saved files are side-by-side PNG panels under `comparisons/`, with GT
+on the left and Dream-Tac prediction on the right. Separate prediction/GT PNGs
+and metric JSON files are not written.
+
 New checkpoints use per-dimension q01/q99 normalization for observation-relative
 action chunks and proprio, with clipping to `[-1, 1]`. The statistics JSON must
 contain `action_chunk_size=20`, `gripper_start_idx=18`, `actions_q01`,

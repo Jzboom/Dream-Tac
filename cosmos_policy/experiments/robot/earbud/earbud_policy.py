@@ -14,7 +14,7 @@ import os
 import pickle
 import time
 from types import SimpleNamespace
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -62,6 +62,15 @@ _LATENT_INDICES = {
 }
 
 _FUTURE_TACTILE_INDICES = (14, 15, 16, 17)
+_FUTURE_CAMERA_LATENT_INDICES = dict(
+    zip(
+        CAMERA_KEYS,
+        (11, 12, 13, 14, 15, 16, 17),
+        strict=True,
+    )
+)
+_NON_IMAGE_LATENT_INDICES = (0, 1, 9, 10)
+_TEMPORAL_COMPRESSION_FACTOR = 4
 _ROTATION_6D_SLICES = (
     ("left", slice(3, 9)),
     ("right", slice(12, 18)),
@@ -88,6 +97,7 @@ class DreamTacEarbudPolicyConfig:
     action_output: Literal["absolute_from_state", "observation_relative"] = "absolute_from_state"
     normalization_mode: Literal["q99", "min_max"] = "q99"
     allow_prompt_fallback: bool = False
+    decode_future_images: bool = False
 
 
 def _as_hwc_uint8(image: Any, *, name: str, image_size: int) -> np.ndarray:
@@ -103,6 +113,29 @@ def _as_hwc_uint8(image: Any, *, name: str, image_size: int) -> np.ndarray:
     if array.shape[:2] != (image_size, image_size):
         array = cv2.resize(array, (image_size, image_size), interpolation=cv2.INTER_AREA)
     return np.ascontiguousarray(array)
+
+
+def prepare_camera_images(
+    raw_images: Mapping[str, Any],
+    *,
+    image_size: int = IMAGE_SIZE,
+    center_crop: bool = True,
+    jpeg_quality: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Validate and transform all seven camera images exactly as inference does."""
+    missing = [name for name in CAMERA_KEYS if name not in raw_images]
+    if missing:
+        raise ValueError(f"Observation is missing Dream-Tac cameras: {missing}")
+
+    images = {name: _as_hwc_uint8(raw_images[name], name=name, image_size=image_size) for name in CAMERA_KEYS}
+    image_stack = np.stack([images[name] for name in CAMERA_KEYS], axis=0)
+    if jpeg_quality is not None:
+        if not 1 <= jpeg_quality <= 95:
+            raise ValueError(f"jpeg_quality must be in [1, 95], got {jpeg_quality}")
+        image_stack = apply_jpeg_compression_np(image_stack, quality=jpeg_quality)
+    if center_crop:
+        image_stack = apply_image_transforms(image_stack)
+    return {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(CAMERA_KEYS)}
 
 
 def validate_and_prepare_observation(
@@ -124,19 +157,12 @@ def validate_and_prepare_observation(
     raw_images = observation.get("images")
     if not isinstance(raw_images, Mapping):
         raise ValueError("Observation is missing an 'images' mapping")
-    missing = [name for name in CAMERA_KEYS if name not in raw_images]
-    if missing:
-        raise ValueError(f"Observation is missing Dream-Tac cameras: {missing}")
-
-    images = {name: _as_hwc_uint8(raw_images[name], name=name, image_size=image_size) for name in CAMERA_KEYS}
-    image_stack = np.stack([images[name] for name in CAMERA_KEYS], axis=0)
-    if jpeg_quality is not None:
-        if not 1 <= jpeg_quality <= 95:
-            raise ValueError(f"jpeg_quality must be in [1, 95], got {jpeg_quality}")
-        image_stack = apply_jpeg_compression_np(image_stack, quality=jpeg_quality)
-    if center_crop:
-        image_stack = apply_image_transforms(image_stack)
-    images = {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(CAMERA_KEYS)}
+    images = prepare_camera_images(
+        raw_images,
+        image_size=image_size,
+        center_crop=center_crop,
+        jpeg_quality=jpeg_quality,
+    )
 
     gate = np.asarray(observation.get("tactile_self_attn_gate"), dtype=np.float32)
     if gate.shape != (2,):
@@ -150,6 +176,48 @@ def validate_and_prepare_observation(
         if not prompt:
             prompt = None
     return state, images, gate, prompt
+
+
+def decode_future_images(
+    model: Any,
+    generated_latent: torch.Tensor,
+    orig_clean_latent_frames: torch.Tensor,
+    *,
+    non_image_latent_indices: Sequence[int] = _NON_IMAGE_LATENT_INDICES,
+    temporal_compression_factor: int = _TEMPORAL_COMPRESSION_FACTOR,
+) -> dict[str, np.ndarray]:
+    """Decode the seven predicted future camera slots into RGB uint8 images.
+
+    Proprio/action values are injected after VAE encoding. Their latent slots must
+    therefore be restored from the clean pre-injection latent before decoding, or
+    they introduce visible artifacts across the reconstructed video.
+    """
+    if generated_latent.ndim != 5 or orig_clean_latent_frames.shape != generated_latent.shape:
+        raise ValueError(
+            "generated_latent and orig_clean_latent_frames must have the same (B,C,T,H,W) shape, "
+            f"got {tuple(generated_latent.shape)} and {tuple(orig_clean_latent_frames.shape)}"
+        )
+    if generated_latent.shape[0] != 1:
+        raise ValueError(f"Earbud inference expects batch size 1, got {generated_latent.shape[0]}")
+
+    latent_for_decode = generated_latent.clone()
+    for latent_index in non_image_latent_indices:
+        if not 0 <= latent_index < latent_for_decode.shape[2]:
+            raise IndexError(f"Non-image latent index {latent_index} is outside T={latent_for_decode.shape[2]}")
+        latent_for_decode[:, :, latent_index] = orig_clean_latent_frames[:, :, latent_index]
+
+    decoded = ((model.decode(latent_for_decode) + 1.0) * 127.5).clamp(0, 255)
+    decoded = decoded.permute(0, 2, 3, 4, 1).to(torch.uint8).cpu().numpy()
+
+    result: dict[str, np.ndarray] = {}
+    for camera_name, latent_index in _FUTURE_CAMERA_LATENT_INDICES.items():
+        raw_index = (latent_index - 1) * temporal_compression_factor + 1
+        if not 0 <= raw_index < decoded.shape[1]:
+            raise IndexError(
+                f"Decoded frame index {raw_index} for {camera_name!r} is outside T={decoded.shape[1]}"
+            )
+        result[camera_name] = np.ascontiguousarray(decoded[0, raw_index])
+    return result
 
 
 def build_pixel_video(images: Mapping[str, np.ndarray]) -> np.ndarray:
@@ -372,6 +440,8 @@ class DreamTacEarbudPolicy:
             "normalization_mode": self.config.normalization_mode,
             "camera_keys": CAMERA_KEYS,
             "image_shape": (self.config.image_size, self.config.image_size, 3),
+            "future_images_decoded": self.config.decode_future_images,
+            "future_image_horizon": CHUNK_SIZE,
             "rtc_supported": False,
         }
 
@@ -513,17 +583,20 @@ class DreamTacEarbudPolicy:
         self._synchronize()
         sampling_start = time.perf_counter()
         with torch.inference_mode():
-            generated = self.model.generate_samples_from_batch(
+            generated_result = self.model.generate_samples_from_batch(
                 data_batch,
                 n_sample=1,
                 num_steps=self.config.num_denoising_steps,
                 seed=self.config.seed,
                 is_negative_prompt=False,
                 use_variance_scale=False,
-                return_orig_clean_latent_frames=False,
+                return_orig_clean_latent_frames=self.config.decode_future_images,
             )
-        if isinstance(generated, tuple):
-            generated = generated[0]
+        orig_clean_latent_frames = None
+        if isinstance(generated_result, tuple):
+            generated, orig_clean_latent_frames = generated_result
+        else:
+            generated = generated_result
         self._synchronize()
         sampling_ms = (time.perf_counter() - sampling_start) * 1000.0
 
@@ -552,6 +625,17 @@ class DreamTacEarbudPolicy:
         else:
             actions = observation_relative
             action_space = "observation_relative_tcp18_absolute_gripper2"
+
+        future_images: dict[str, np.ndarray] | None = None
+        if self.config.decode_future_images:
+            if orig_clean_latent_frames is None:
+                raise RuntimeError("Model did not return clean latent frames required for future image decoding")
+            with torch.inference_mode():
+                future_images = decode_future_images(
+                    self.model,
+                    generated,
+                    orig_clean_latent_frames,
+                )
         postprocess_ms = (time.perf_counter() - postprocess_start) * 1000.0
 
         response: dict[str, Any] = {
@@ -568,6 +652,8 @@ class DreamTacEarbudPolicy:
             response["observation_relative_actions"] = observation_relative
         if "observation_seq" in observation:
             response["observation_seq"] = observation["observation_seq"]
+        if future_images is not None:
+            response["future_images"] = future_images
         return response
 
     def warmup(self) -> dict[str, Any]:
