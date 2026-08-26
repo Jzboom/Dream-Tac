@@ -39,6 +39,21 @@ CAMERA_KEYS = (
     "right_tactile_1",
 )
 
+# The checkpoint was trained with the numeric tactile names in CAMERA_KEYS,
+# while the robot client names each sensor by arm and mounting side.  Keep the
+# model-facing names stable and translate only at the inference boundary so the
+# latent-slot order remains identical to training.
+CLIENT_CAMERA_KEYS = (
+    "head",
+    "left_wrist",
+    "right_wrist",
+    "left_tactile_left",
+    "left_tactile_right",
+    "right_tactile_left",
+    "right_tactile_right",
+)
+_CLIENT_TO_MODEL_CAMERA_KEY = dict(zip(CLIENT_CAMERA_KEYS, CAMERA_KEYS, strict=True))
+
 STATE_DIM = 20
 CHUNK_SIZE = 20
 ACTION_DIM = 20
@@ -122,12 +137,33 @@ def prepare_camera_images(
     center_crop: bool = True,
     jpeg_quality: int | None = None,
 ) -> dict[str, np.ndarray]:
-    """Validate and transform all seven camera images exactly as inference does."""
-    missing = [name for name in CAMERA_KEYS if name not in raw_images]
+    """Validate and transform all seven camera images exactly as inference does.
+
+    Robot-facing tactile names (for example ``left_tactile_left``) are mapped
+    to the numeric names used by the training dataset.  The legacy numeric
+    names remain accepted for offline evaluation and older clients.
+    """
+    duplicate_aliases = [
+        (client_name, model_name)
+        for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items()
+        if client_name != model_name and client_name in raw_images and model_name in raw_images
+    ]
+    if duplicate_aliases:
+        pairs = [f"{client_name}/{model_name}" for client_name, model_name in duplicate_aliases]
+        raise ValueError(f"Observation contains both client and legacy names for the same cameras: {pairs}")
+
+    missing = [
+        client_name
+        for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items()
+        if client_name not in raw_images and model_name not in raw_images
+    ]
     if missing:
         raise ValueError(f"Observation is missing Dream-Tac cameras: {missing}")
 
-    images = {name: _as_hwc_uint8(raw_images[name], name=name, image_size=image_size) for name in CAMERA_KEYS}
+    images = {}
+    for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items():
+        source_name = client_name if client_name in raw_images else model_name
+        images[model_name] = _as_hwc_uint8(raw_images[source_name], name=source_name, image_size=image_size)
     image_stack = np.stack([images[name] for name in CAMERA_KEYS], axis=0)
     if jpeg_quality is not None:
         if not 1 <= jpeg_quality <= 95:
@@ -440,7 +476,8 @@ class DreamTacEarbudPolicy:
             "action_horizon": CHUNK_SIZE,
             "action_space": action_space,
             "normalization_mode": self.config.normalization_mode,
-            "camera_keys": CAMERA_KEYS,
+            "camera_keys": CLIENT_CAMERA_KEYS,
+            "legacy_camera_keys": CAMERA_KEYS,
             "image_shape": (self.config.image_size, self.config.image_size, 3),
             "future_images_decoded": self.config.decode_future_images,
             "future_image_horizon": CHUNK_SIZE,
