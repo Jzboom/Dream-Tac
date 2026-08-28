@@ -38,7 +38,14 @@ from cosmos_policy._src.predict2.tokenizers.interface import VideoTokenizerInter
 from cosmos_policy._src.predict2.tokenizers.wan2pt1 import WanVAE_ as BaseWanVAE_
 from cosmos_policy._src.predict2.tokenizers.wan2pt1_2d_plugins import plugin_mount
 from cosmos_policy._src.predict2.utils.tokenizer_benchmarking import BenchmarkTimes
+from cosmos_policy.config.local_paths import DEFAULT_COSMOS_PREDICT2_ROOT, DEFAULT_WAN_VAE
 from cosmos_policy.utils.checkpoint_utils import resolve_checkpoint_path
+
+_DEFAULT_WAN_VAE = os.environ.get("DREAMTAC_WAN_VAE", str(DEFAULT_WAN_VAE))
+_DEFAULT_WAN_MEAN_STD = os.environ.get(
+    "DREAMTAC_WAN_MEAN_STD",
+    str(DEFAULT_COSMOS_PREDICT2_ROOT / "tokenizer" / "mean_std.pt"),
+)
 
 
 class WanVAE_(BaseWanVAE_):
@@ -89,7 +96,7 @@ def _policy_video_vae(
     device="cpu",
     s3_credential_path: str = "credentials/s3_training.secret",
     load_mean_std=False,
-    mean_std_path: str = "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth",
+    mean_std_path: str = _DEFAULT_WAN_MEAN_STD,
     **kwargs,
 ):
     """
@@ -205,10 +212,10 @@ class CosmosPolicyWanVAE:
     def __init__(
         self,
         z_dim=16,
-        vae_pth="/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth",
+        vae_pth=_DEFAULT_WAN_VAE,
         s3_credential_path: str = "credentials/s3_training.secret",
         load_mean_std=False,
-        mean_std_path: str = "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/mean_std.pt",
+        mean_std_path: str = _DEFAULT_WAN_MEAN_STD,
         dtype=torch.bfloat16,
         device="cuda",
         is_amp=True,
@@ -478,7 +485,7 @@ class Wan2pt1VAEInterface(VideoTokenizerInterface):
             load_mean_std=load_mean_std,
             vae_pth=kwargs.get(
                 "vae_pth",
-                "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth",
+                _DEFAULT_WAN_VAE,
             ),
             s3_credential_path=kwargs.get("s3_credential_path", "credentials/s3_training.secret"),
             temporal_window=kwargs.get("temporal_window", 4),

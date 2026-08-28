@@ -38,12 +38,12 @@ Across six real-world contact-rich tasks, Dream-Tac improves over Cosmos Policy 
 ```text
 cosmos_policy/
 ├── config/local_paths.py                              # default sibling-directory paths
-├── config/experiment/lerobot_earbud_experiment_configs.py
-├── datasets/lerobot_earbud_dataset.py                 # LeRobot-Xense dataset and statistics
+├── config/experiment/lerobot_bi_flexiv_experiment_configs.py
+├── datasets/lerobot_bi_flexiv_dataset.py              # LeRobot bi_flexiv dataset and statistics
 ├── datasets/save_lerobot_t5_text_embeddings.py        # task-text embedding generation
 ├── _src/predict2/networks/tactile_self_attn_chunked.py
 ├── models/policy_video2world_model.py
-├── experiments/robot/earbud/                          # local policy server and protocol
+├── experiments/robot/bi_flexiv/                       # local policy server and protocol
 └── scripts/train.py                                    # training entry point
 ```
 
@@ -62,8 +62,14 @@ The active training configuration targets a LeRobot v3-style dual-arm dataset wi
 The experiment name is:
 
 ```text
-cosmos_predict2_2b_480p_lerobot_earbud_tactile
+cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile
 ```
+
+The former `earbud` module, experiment, and class names remain available as
+compatibility aliases. Existing checkpoints are model-compatible and do not
+need conversion. New statistics are written as
+`dataset_statistics_lerobot_bi_flexiv.json`; if only the former statistics
+filename exists, the dataset loader reads it automatically.
 
 The dataset directory can be changed at launch time with:
 
@@ -178,7 +184,7 @@ your_lerobot_dataset/
 │   ├── tasks.parquet
 │   └── episodes/
 ├── t5_embeddings.pkl
-└── dataset_statistics_lerobot_earbud.json
+└── dataset_statistics_lerobot_bi_flexiv.json
 ```
 
 ### 3.2 Generate T5 task embeddings
@@ -206,13 +212,13 @@ Regenerate this file whenever the exact task text changes.
 Run statistics generation once in a single process before multi-GPU training:
 
 ```bash
-python -c 'from cosmos_policy.datasets.lerobot_earbud_dataset import LeRobotEarbudDataset as D; D(data_dir="../pick_up_cube_0713", t5_text_embeddings_path="")'
+python -c 'from cosmos_policy.datasets.lerobot_bi_flexiv_dataset import LeRobotBiFlexivDataset as D; D(data_dir="../pick_up_cube_0713", t5_text_embeddings_path="")'
 ```
 
 Output:
 
 ```text
-../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json
+../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json
 ```
 
 The statistics use the training defaults:
@@ -230,7 +236,7 @@ If the statistics file is missing, training can generate it automatically. Pre-g
 ```bash
 ls -lh \
   ../pick_up_cube_0713/t5_embeddings.pkl \
-  ../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json \
+  ../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json \
   ../checkpoints/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt \
   ../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
 ```
@@ -243,7 +249,7 @@ ls -lh \
 |---|---|
 | Training entry | `cosmos_policy/scripts/train.py` |
 | Config router | `cosmos_policy/config/config.py` |
-| LeRobot experiment | `cosmos_policy/config/experiment/lerobot_earbud_experiment_configs.py` |
+| LeRobot experiment | `cosmos_policy/config/experiment/lerobot_bi_flexiv_experiment_configs.py` |
 | Default local paths | `cosmos_policy/config/local_paths.py` |
 
 ### 4.1 Dry-run configuration validation
@@ -252,7 +258,7 @@ ls -lh \
 python -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py \
   --dryrun -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
@@ -272,7 +278,7 @@ torchrun \
   --nproc_per_node=8 \
   -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
@@ -329,7 +335,7 @@ torchrun \
   --nproc_per_node=8 \
   -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_earbud_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   checkpoint.load_path=../checkpoints/path/to/checkpoints/iter_000100000 \
@@ -359,18 +365,18 @@ The trained dual-arm policy can be served through the WebSocket/MsgPack interfac
 ```bash
 export DREAMTAC_CKPT=../checkpoints/path/to/checkpoints/iter_XXXXXXXX
 export DREAMTAC_WAN_VAE=../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
-export DREAMTAC_STATS=../pick_up_cube_0713/dataset_statistics_lerobot_earbud.json
+export DREAMTAC_STATS=../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json
 export DREAMTAC_T5=../pick_up_cube_0713/t5_embeddings.pkl
 export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
 
-python -m cosmos_policy.experiments.robot.earbud.earbud_server \
-  --config cosmos_predict2_2b_480p_lerobot_earbud_tactile__inference_only
+python -m cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_server \
+  --config cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only \
   --host 0.0.0.0 \
   --port 8000 \
   --num-denoising-steps 5
 ```
 
-Requests contain a 20D state, three RGB views, four tactile views, and a two-value tactile gate. See `cosmos_policy/experiments/robot/earbud/README.md` for the full protocol.
+Requests contain a 20D state, three RGB views, four tactile views, and a two-value tactile gate. See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
 
 ---
 

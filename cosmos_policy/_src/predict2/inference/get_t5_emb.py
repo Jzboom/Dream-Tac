@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import ClassVar, List, Optional, Tuple, Union
 
 import attrs
@@ -20,9 +21,11 @@ import torch
 import transformers
 from transformers import T5EncoderModel, T5TokenizerFast
 
+from cosmos_policy.config.local_paths import DEFAULT_CHECKPOINT_ROOT
+
 transformers.logging.set_verbosity_error()
 
-T5_MODEL_DIR = "/data/earbud_case_sequential_insertion_teleop/jhn/checkpoints/google-t5/t5-11b"
+T5_MODEL_DIR = os.environ.get("DREAMTAC_T5_MODEL", str(DEFAULT_CHECKPOINT_ROOT / "google-t5" / "t5-11b"))
 
 
 class CosmosT5TextEncoder(torch.nn.Module):

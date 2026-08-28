@@ -1,1 +1,1 @@
-"""Dream-Tac earbud policy deployment helpers."""
+"""Backward-compatible package for the former earbud deployment name."""
