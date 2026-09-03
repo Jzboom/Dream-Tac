@@ -156,7 +156,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=os.environ.get(
-            "DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only"
+            "DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only"
         ),
     )
     parser.add_argument(
@@ -170,7 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-denoising-steps",
         type=int,
-        default=int(os.environ.get("DREAMTAC_NUM_DENOISING_STEPS", "5")),
+        default=int(os.environ.get("DREAMTAC_NUM_DENOISING_STEPS", "10")),
     )
     parser.add_argument("--seed", type=int, default=int(os.environ.get("DREAMTAC_SEED", "0")))
     parser.add_argument(
@@ -192,6 +192,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--center-crop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--clip-normalized-actions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-prompt-fallback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--diffusion-step-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run full DiT blocks on denoiser calls 1 and 3 and reuse residuals on the other calls.",
+    )
     parser.add_argument("--warmup", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
@@ -222,12 +228,14 @@ def main(argv: list[str] | None = None) -> None:
         action_output=args.action_output,
         normalization_mode=args.normalization_mode,
         allow_prompt_fallback=args.allow_prompt_fallback,
+        diffusion_step_cache=args.diffusion_step_cache,
     )
 
     logger.info(
-        "Loading Dream-Tac policy from %s (denoising_steps=%d, action_output=%s)",
+        "Loading Dream-Tac policy from %s (denoising_steps=%d, diffusion_step_cache=%s, action_output=%s)",
         config.checkpoint_path,
         config.num_denoising_steps,
+        config.diffusion_step_cache,
         config.action_output,
     )
     load_start = time.perf_counter()

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Open-loop only: hard-coded TeaCache-style residual reuse for DiT blocks.
-# When num_denoising_steps_action == 5, only sub-steps 0 and 2 run full block stacks;
-# steps 1,3,4 reuse cached block residual (x_after_blocks - x_before_blocks) from
-# the last matching full step (step 1 uses residual from 0; steps 3,4 use residual from 2).
+# With 5 or 10 denoiser calls, only calls 0 and 2 run full block stacks. All
+# remaining calls reuse cached block residuals (x_after_blocks - x_before_blocks):
+# call 1 uses call 0, while calls 3 onward use call 2.
 #
 # Mirrors the idea in efficiency/teacache_sample_video_i2v.py (residual skip inside forward).
 #
@@ -12,12 +12,9 @@
 # 1) CosmosPolicySampler (cosmos_sampler.py) rewrites num_steps: for N>1 it does N->N-1 for nfe, then
 #    adds one extra denoiser call when sample_clean. So **N user steps => N denoise() calls** for N>=2,
 #    except N=2 becomes N-1=1 and hits the **special branch** => only **one** denoise() total (not two).
-# 2) Each denoise() still runs: LVG concat, prepare_embedded_sequence (patch x_embedder), cross-attn
-#    projection, **t_embedder** (timestep changes every step), optional tactile bias, **final_layer**,
-#    unpatchify — on **every** sub-step. Hard cache only skips the **self.blocks** loop on 3/5 steps.
-# 3) So vs 10 full steps you save mostly **8× DiT blocks**, but you still pay **5×** embed/t_embed/final
-#    on the 5-step path; vs true 2-step you would pay **2×** those (and 2× blocks). The "2 block passes"
-#    number does **not** mean only 2 end-to-end forwards of the non-block parts.
+# 2) Each denoise() still runs LVG concat, patch/timestep embedding, final_layer, and unpatchify.
+#    Hard caching skips only the transformer block loop on N-2 of the N calls.
+# 3) "Two block passes" therefore does not mean two end-to-end denoiser calls.
 
 from __future__ import annotations
 
@@ -129,10 +126,10 @@ def minimal_v4_dit_forward_with_hard_block_cache(
     intermediate_features_outputs = []
     x_in_before_blocks = x_B_T_H_W_D
 
-    # Hard schedule for total_calls == 5: full at 0 and 2; cache at 1,3,4
-    middle = total_calls // 2
-    full_indices = {0, middle}
-    use_cache = total_calls == 5 and getattr(net, "_openloop_hard_block_cache_active", True)
+    # Paper schedule: full blocks on the first and third calls, reuse otherwise.
+    second_full_call = 2
+    full_indices = {0, second_full_call}
+    use_cache = total_calls in (5, 10) and getattr(net, "_openloop_hard_block_cache_active", True)
 
     if use_cache and call_idx in full_indices:
         for i, block in enumerate(net.blocks):
@@ -151,13 +148,13 @@ def minimal_v4_dit_forward_with_hard_block_cache(
         delta = x_B_T_H_W_D - x_in_before_blocks
         if call_idx == 0:
             net._openloop_residual_after_first = delta
-        elif call_idx == middle:
-            net._openloop_residual_after_middle = delta
+        elif call_idx == second_full_call:
+            net._openloop_residual_after_third = delta
     elif use_cache:
         if call_idx == 1:
             res = getattr(net, "_openloop_residual_after_first", None)
         else:
-            res = getattr(net, "_openloop_residual_after_middle", None)
+            res = getattr(net, "_openloop_residual_after_third", None)
         if res is None:
             log.warning(
                 "openloop_hard_residual_cache: missing cached residual at call_idx=%s; running full blocks.",
@@ -216,6 +213,7 @@ def reset_openloop_denoise_counter(model: torch.nn.Module) -> None:
         for name in (
             "_openloop_residual_after_first",
             "_openloop_residual_after_middle",
+            "_openloop_residual_after_third",
         ):
             if hasattr(net, name):
                 delattr(net, name)
@@ -224,20 +222,20 @@ def reset_openloop_denoise_counter(model: torch.nn.Module) -> None:
 def apply_openloop_hard_residual_cache(model: torch.nn.Module, num_denoising_steps: int = 5) -> None:
     """
     Patch model.denoise for open-loop hard residual cache. Original denoise saved on model._denoise_orig.
-    Only affects sampling when num_denoising_steps == 5 (other values fall back to full blocks every step).
+    Supports the paper schedule for 5 or 10 denoiser calls.
     """
     import types
 
     if getattr(model, "_openloop_hard_residual_cache_patched", False):
         model._openloop_residual_cache_num_steps = num_denoising_steps
+        model._openloop_hard_residual_cache = True
         return
 
-    if num_denoising_steps == 5 and not getattr(model, "_openloop_hard_cache_cost_note_printed", False):
+    if num_denoising_steps in (5, 10) and not getattr(model, "_openloop_hard_cache_cost_note_printed", False):
         print(
-            "[openloop_hard_residual_cache] 5 user denoise steps => 5× denoise() calls; each call still "
-            "runs patch embed + t_embed + final_layer; only DiT **blocks** are skipped on 3/5 calls. "
-            "Latency vs 10 steps ≈ saved blocks, not 5× overall speedup. "
-            "FRANKA_NUM_DENOISING_STEPS=2 uses sampler special-case => **1** denoise() call (see cosmos_sampler.py)."
+            f"[openloop_hard_residual_cache] {num_denoising_steps} denoiser calls: full DiT blocks on "
+            f"calls 1 and 3; reuse cached residuals on {num_denoising_steps - 2} calls. Every call still "
+            "runs patch embed + t_embed + final_layer."
         )
         model._openloop_hard_cache_cost_note_printed = True
 
@@ -268,7 +266,7 @@ def denoise_openloop_hard_cache(self: Any, xt_B_C_T_H_W: torch.Tensor, sigma: to
         return self._denoise_orig(xt_B_C_T_H_W, sigma, condition)
 
     ns = int(getattr(self, "_openloop_residual_cache_num_steps", 5))
-    if ns != 5:
+    if ns not in (5, 10):
         return self._denoise_orig(xt_B_C_T_H_W, sigma, condition)
     if sigma.ndim == 1:
         sigma_B_T = rearrange(sigma, "b -> b 1")
@@ -318,7 +316,7 @@ def denoise_openloop_hard_cache(self: Any, xt_B_C_T_H_W: torch.Tensor, sigma: to
     idx = int(getattr(self, "_openloop_denoise_idx", 0))
     self._openloop_denoise_idx = idx + 1
 
-    # CosmosPolicySampler: for num_steps=5 -> 4 inner + 1 clean = 5 denoise calls
+    # CosmosPolicySampler uses N-1 solver calls plus one final clean call.
     setattr(self.net, "_openloop_hard_block_cache_active", True)
     net_output_B_C_T_H_W = minimal_v4_dit_forward_with_hard_block_cache(
         self.net,
@@ -326,7 +324,7 @@ def denoise_openloop_hard_cache(self: Any, xt_B_C_T_H_W: torch.Tensor, sigma: to
         timesteps_B_T,
         cond_dict["crossattn_emb"],
         call_idx=idx,
-        total_calls=5,
+        total_calls=ns,
         fps=cond_dict.get("fps"),
         padding_mask=cond_dict.get("padding_mask"),
         data_type=cond_dict.get("data_type", DataType.VIDEO),

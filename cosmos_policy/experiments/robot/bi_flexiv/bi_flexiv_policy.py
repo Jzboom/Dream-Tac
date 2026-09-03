@@ -1,11 +1,4 @@
-"""Local Dream-Tac inference policy for the LeRobot bi_flexiv platform.
-
-The training dataset uses seven RGB/tactile views, a 20-dimensional dual-arm
-state, and one latent action slot containing a 20-step by 20-dimensional action
-chunk. The first 18 action dimensions are target poses relative to the current
-observation at the start of the chunk; the two gripper dimensions are absolute
-positions.
-"""
+"""Local inference for the 11-slot bi_flexiv world-action policy."""
 
 from __future__ import annotations
 
@@ -28,6 +21,7 @@ from cosmos_policy.experiments.robot.cosmos_utils import (
     load_dataset_stats,
     unnormalize_actions,
 )
+from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
 
 CAMERA_KEYS = (
     "head",
@@ -59,32 +53,32 @@ CHUNK_SIZE = 20
 ACTION_DIM = 20
 GRIPPER_START_IDX = 18
 IMAGE_SIZE = 224
-STATE_T = 18
-NUM_CONDITIONAL_FRAMES = 9
-ACTION_LATENT_IDX = 9
-PIXEL_FRAMES = 69
+STATE_T = 11
+NUM_CONDITIONAL_FRAMES = 7
+ACTION_LATENT_IDX = 7
+PIXEL_FRAMES = 41
 _LATENT_INDICES = {
     "current_proprio_latent_idx": 1,
     "current_image_latent_idx": 2,
     "current_wrist_image_latent_idx": 3,
     "current_wrist_image2_latent_idx": 4,
-    "action_latent_idx": 9,
-    "future_proprio_latent_idx": 10,
-    "future_image_latent_idx": 11,
-    "future_wrist_image_latent_idx": 12,
-    "future_wrist_image2_latent_idx": 13,
+    "action_latent_idx": 7,
+    "future_proprio_latent_idx": -1,
+    "future_image_latent_idx": 8,
+    "future_wrist_image_latent_idx": 9,
+    "future_wrist_image2_latent_idx": 10,
     "value_latent_idx": -1,
 }
 
-_FUTURE_TACTILE_INDICES = (14, 15, 16, 17)
-_FUTURE_CAMERA_LATENT_INDICES = dict(
+_MERGED_TACTILE_KEYS = ("left_tactile_merged", "right_tactile_merged")
+_FUTURE_RGB_LATENT_INDICES = dict(
     zip(
-        CAMERA_KEYS,
-        (11, 12, 13, 14, 15, 16, 17),
+        CAMERA_KEYS[:3],
+        (8, 9, 10),
         strict=True,
     )
 )
-_NON_IMAGE_LATENT_INDICES = (0, 1, 9, 10)
+_NON_IMAGE_LATENT_INDICES = (0, 1, 7)
 _TEMPORAL_COMPRESSION_FACTOR = 4
 _ROTATION_6D_SLICES = (
     ("left", slice(3, 9)),
@@ -100,10 +94,10 @@ class DreamTacBiFlexivPolicyConfig:
     dataset_stats_path: str
     t5_embeddings_path: str
     default_prompt: str
-    config_name: str = "cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only"
+    config_name: str = "cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only"
     config_file: str = "cosmos_policy/config/config.py"
     wan_vae_path: str | None = None
-    num_denoising_steps: int = 5
+    num_denoising_steps: int = 10
     seed: int = 0
     image_size: int = IMAGE_SIZE
     center_crop: bool = True
@@ -113,9 +107,10 @@ class DreamTacBiFlexivPolicyConfig:
     normalization_mode: Literal["q99", "min_max"] = "q99"
     allow_prompt_fallback: bool = False
     decode_future_images: bool = False
+    diffusion_step_cache: bool = True
 
 
-def _as_hwc_uint8(image: Any, *, name: str, image_size: int) -> np.ndarray:
+def _as_hwc_uint8(image: Any, *, name: str, image_size: int | None) -> np.ndarray:
     array = np.asarray(image)
     if array.ndim != 3:
         raise ValueError(f"Image {name!r} must have 3 dimensions, got {array.shape}")
@@ -125,9 +120,33 @@ def _as_hwc_uint8(image: Any, *, name: str, image_size: int) -> np.ndarray:
         raise ValueError(f"Image {name!r} must be HWC or CHW RGB, got {array.shape}")
     if array.dtype != np.uint8:
         raise ValueError(f"Image {name!r} must have dtype uint8, got {array.dtype}")
-    if array.shape[:2] != (image_size, image_size):
+    if image_size is not None and array.shape[:2] != (image_size, image_size):
         array = cv2.resize(array, (image_size, image_size), interpolation=cv2.INTER_AREA)
     return np.ascontiguousarray(array)
+
+
+def prepare_rgb_images(
+    raw_images: Mapping[str, Any],
+    *,
+    image_size: int = IMAGE_SIZE,
+    center_crop: bool = True,
+    jpeg_quality: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Apply the model's deterministic preprocessing to the three RGB views."""
+    missing = [name for name in CAMERA_KEYS[:3] if name not in raw_images]
+    if missing:
+        raise ValueError(f"RGB observation is missing cameras: {missing}")
+    image_stack = np.stack(
+        [_as_hwc_uint8(raw_images[name], name=name, image_size=image_size) for name in CAMERA_KEYS[:3]],
+        axis=0,
+    )
+    if jpeg_quality is not None:
+        if not 1 <= jpeg_quality <= 95:
+            raise ValueError(f"jpeg_quality must be in [1, 95], got {jpeg_quality}")
+        image_stack = apply_jpeg_compression_np(image_stack, quality=jpeg_quality)
+    if center_crop:
+        image_stack = apply_image_transforms(image_stack)
+    return {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(CAMERA_KEYS[:3])}
 
 
 def prepare_camera_images(
@@ -137,12 +156,14 @@ def prepare_camera_images(
     center_crop: bool = True,
     jpeg_quality: int | None = None,
 ) -> dict[str, np.ndarray]:
-    """Validate and transform all seven camera images exactly as inference does.
+    """Prepare three RGB views and two merged tactile condition views.
 
     Robot-facing tactile names (for example ``left_tactile_left``) are mapped
     to the numeric names used by the training dataset.  The legacy numeric
     names remain accepted for offline evaluation and older clients.
     """
+    if image_size != IMAGE_SIZE:
+        raise ValueError(f"The merged-tactile policy requires image_size={IMAGE_SIZE}, got {image_size}")
     duplicate_aliases = [
         (client_name, model_name)
         for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items()
@@ -160,18 +181,41 @@ def prepare_camera_images(
     if missing:
         raise ValueError(f"Observation is missing Dream-Tac cameras: {missing}")
 
-    images = {}
+    resolved_images = {}
     for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items():
         source_name = client_name if client_name in raw_images else model_name
-        images[model_name] = _as_hwc_uint8(raw_images[source_name], name=source_name, image_size=image_size)
-    image_stack = np.stack([images[name] for name in CAMERA_KEYS], axis=0)
+        resolved_images[model_name] = _as_hwc_uint8(
+            raw_images[source_name],
+            name=source_name,
+            image_size=None if "tactile" in model_name else image_size,
+        )
+
+    images = prepare_rgb_images(
+        resolved_images,
+        image_size=image_size,
+        center_crop=center_crop,
+        jpeg_quality=jpeg_quality,
+    )
+
+    merged_stack = np.stack(
+        [
+            merge_tactile_pair_vertical(
+                resolved_images["left_tactile_0"],
+                resolved_images["left_tactile_1"],
+            ),
+            merge_tactile_pair_vertical(
+                resolved_images["right_tactile_0"],
+                resolved_images["right_tactile_1"],
+            ),
+        ],
+        axis=0,
+    )
     if jpeg_quality is not None:
-        if not 1 <= jpeg_quality <= 95:
-            raise ValueError(f"jpeg_quality must be in [1, 95], got {jpeg_quality}")
-        image_stack = apply_jpeg_compression_np(image_stack, quality=jpeg_quality)
-    if center_crop:
-        image_stack = apply_image_transforms(image_stack)
-    return {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(CAMERA_KEYS)}
+        merged_stack = apply_jpeg_compression_np(merged_stack, quality=jpeg_quality)
+    images.update(
+        {name: np.ascontiguousarray(merged_stack[index]) for index, name in enumerate(_MERGED_TACTILE_KEYS)}
+    )
+    return images
 
 
 def validate_and_prepare_observation(
@@ -224,7 +268,7 @@ def decode_future_images(
     non_image_latent_indices: Sequence[int] = _NON_IMAGE_LATENT_INDICES,
     temporal_compression_factor: int = _TEMPORAL_COMPRESSION_FACTOR,
 ) -> dict[str, np.ndarray]:
-    """Decode the seven predicted future camera slots into RGB uint8 images.
+    """Decode the three predicted future RGB slots into RGB uint8 images.
 
     Proprio/action values are injected after VAE encoding. Their latent slots must
     therefore be restored from the clean pre-injection latent before decoding, or
@@ -248,7 +292,7 @@ def decode_future_images(
     decoded = decoded.permute(0, 2, 3, 4, 1).to(torch.uint8).cpu().numpy()
 
     result: dict[str, np.ndarray] = {}
-    for camera_name, latent_index in _FUTURE_CAMERA_LATENT_INDICES.items():
+    for camera_name, latent_index in _FUTURE_RGB_LATENT_INDICES.items():
         raw_index = (latent_index - 1) * temporal_compression_factor + 1
         if not 0 <= raw_index < decoded.shape[1]:
             raise IndexError(
@@ -259,7 +303,7 @@ def decode_future_images(
 
 
 def build_pixel_video(images: Mapping[str, np.ndarray]) -> np.ndarray:
-    """Build the 69-frame uint8 video tensor used by the 18-slot WAN VAE."""
+    """Build the 41-frame uint8 video tensor used by the 11-slot WAN VAE."""
     blank = np.zeros_like(images["head"])
     unique_frames = [
         blank,
@@ -267,21 +311,14 @@ def build_pixel_video(images: Mapping[str, np.ndarray]) -> np.ndarray:
         images["head"],
         images["left_wrist"],
         images["right_wrist"],
-        images["left_tactile_0"],
-        images["left_tactile_1"],
-        images["right_tactile_0"],
-        images["right_tactile_1"],
-        blank,
+        images["left_tactile_merged"],
+        images["right_tactile_merged"],
         blank,
         images["head"],
         images["left_wrist"],
         images["right_wrist"],
-        images["left_tactile_0"],
-        images["left_tactile_1"],
-        images["right_tactile_0"],
-        images["right_tactile_1"],
     ]
-    repeats = np.asarray([1] + [4] * 17, dtype=np.int64)
+    repeats = np.asarray([1] + [4] * 10, dtype=np.int64)
     video_thwc = np.repeat(np.stack(unique_frames, axis=0), repeats, axis=0)
     if video_thwc.shape != (PIXEL_FRAMES, IMAGE_SIZE, IMAGE_SIZE, 3):
         raise ValueError(f"Unexpected pixel video shape: {video_thwc.shape}")
@@ -418,6 +455,8 @@ class DreamTacBiFlexivPolicy:
         self.config = config
         if config.image_size != IMAGE_SIZE:
             raise ValueError(f"The trained bi_flexiv policy requires image_size={IMAGE_SIZE}, got {config.image_size}")
+        if config.diffusion_step_cache and config.num_denoising_steps not in (5, 10):
+            raise ValueError("diffusion_step_cache requires num_denoising_steps to be 5 or 10")
         experiment_opts: list[str] = []
         if config.wan_vae_path:
             wan_vae_path = os.path.abspath(os.path.expanduser(config.wan_vae_path))
@@ -441,6 +480,18 @@ class DreamTacBiFlexivPolicy:
             self.model = model
             self.cosmos_config = None
         self.model.eval()
+        if config.diffusion_step_cache:
+            from cosmos_policy.experiments.robot.openloop_hard_residual_cache import (
+                apply_openloop_hard_residual_cache,
+            )
+
+            apply_openloop_hard_residual_cache(self.model, num_denoising_steps=config.num_denoising_steps)
+        elif getattr(self.model, "_openloop_hard_residual_cache_patched", False):
+            from cosmos_policy.experiments.robot.openloop_hard_residual_cache import (
+                remove_openloop_hard_residual_cache,
+            )
+
+            remove_openloop_hard_residual_cache(self.model)
         self.device = self._get_model_device()
 
         self.dataset_stats = (
@@ -478,8 +529,13 @@ class DreamTacBiFlexivPolicy:
             "normalization_mode": self.config.normalization_mode,
             "camera_keys": CLIENT_CAMERA_KEYS,
             "legacy_camera_keys": CAMERA_KEYS,
+            "condition_image_keys": CAMERA_KEYS[:3] + _MERGED_TACTILE_KEYS,
             "image_shape": (self.config.image_size, self.config.image_size, 3),
             "future_images_decoded": self.config.decode_future_images,
+            "state_t": STATE_T,
+            "num_conditional_frames": NUM_CONDITIONAL_FRAMES,
+            "action_latent_idx": ACTION_LATENT_IDX,
+            "diffusion_step_cache": self.config.diffusion_step_cache,
             "future_image_horizon": CHUNK_SIZE,
             "rtc_supported": False,
         }
@@ -526,7 +582,7 @@ class DreamTacBiFlexivPolicy:
         max_frames = int(getattr(self.model.config, "max_num_conditional_frames", -1))
         if (state_t, min_frames, max_frames) != (STATE_T, NUM_CONDITIONAL_FRAMES, NUM_CONDITIONAL_FRAMES):
             raise ValueError(
-                "Checkpoint is not the 18-slot Dream-Tac bi_flexiv policy: "
+                "Checkpoint/config is not the 11-slot Dream-Tac bi_flexiv policy: "
                 f"state_t={state_t}, min_conditional={min_frames}, max_conditional={max_frames}"
             )
         pixel_frames = int(self.model.tokenizer.get_pixel_num_frames(state_t))
@@ -575,11 +631,6 @@ class DreamTacBiFlexivPolicy:
             "num_conditional_frames": NUM_CONDITIONAL_FRAMES,
             "proprio": torch.from_numpy(normalized_state[None]).to(device=self.device, dtype=torch.bfloat16),
             "tactile_self_attn_gate": torch.from_numpy(tactile_gate[None]).to(device=self.device, dtype=torch.float32),
-            "future_tactile_latent_indices": torch.tensor(
-                [_FUTURE_TACTILE_INDICES], device=self.device, dtype=torch.int64
-            ),
-            "future_tactile_left_latent_idx": torch.tensor([14], device=self.device, dtype=torch.int64),
-            "future_tactile_right_latent_idx": torch.tensor([16], device=self.device, dtype=torch.int64),
         }
         for name, index in _LATENT_INDICES.items():
             data_batch[name] = torch.tensor([index], device=self.device, dtype=torch.int64)
@@ -625,6 +676,12 @@ class DreamTacBiFlexivPolicy:
         preprocess_ms = (time.perf_counter() - preprocess_start) * 1000.0
 
         sampling_start = time.perf_counter()
+        if self.config.diffusion_step_cache:
+            from cosmos_policy.experiments.robot.openloop_hard_residual_cache import (
+                reset_openloop_denoise_counter,
+            )
+
+            reset_openloop_denoise_counter(self.model)
         with torch.inference_mode():
             generated_result = self.model.generate_samples_from_batch(
                 data_batch,

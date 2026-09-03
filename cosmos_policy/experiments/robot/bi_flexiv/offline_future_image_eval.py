@@ -11,7 +11,7 @@ from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import (
     CHUNK_SIZE,
     DreamTacBiFlexivPolicy,
     DreamTacBiFlexivPolicyConfig,
-    prepare_camera_images,
+    prepare_rgb_images,
 )
 from cosmos_policy.experiments.robot.bi_flexiv.future_image_eval import FutureImageEvaluationWriter
 
@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=os.environ.get(
-            "DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only"
+            "DREAMTAC_CONFIG", "cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only"
         ),
     )
     parser.add_argument(
@@ -42,8 +42,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-denoising-steps",
         type=int,
-        default=int(os.environ.get("DREAMTAC_NUM_DENOISING_STEPS", "5")),
-        help="Diffusion sampling steps; CLI overrides DREAMTAC_NUM_DENOISING_STEPS, whose fallback is 5.",
+        default=int(os.environ.get("DREAMTAC_NUM_DENOISING_STEPS", "10")),
+        help="Diffusion sampling steps; CLI overrides DREAMTAC_NUM_DENOISING_STEPS, whose fallback is 10.",
     )
     parser.add_argument("--seed", type=int, default=int(os.environ.get("DREAMTAC_SEED", "0")))
     parser.add_argument(
@@ -55,6 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--center-crop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--clip-normalized-actions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-prompt-fallback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--diffusion-step-cache", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
 
@@ -89,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
         normalization_mode=args.normalization_mode,
         allow_prompt_fallback=args.allow_prompt_fallback,
         decode_future_images=True,
+        diffusion_step_cache=args.diffusion_step_cache,
     )
 
     dataset = LeRobotBiFlexivDataset(
@@ -131,7 +133,7 @@ def main(argv: list[str] | None = None) -> None:
             predictions = response.get("future_images")
             if not predictions:
                 raise RuntimeError("Policy did not return decoded future_images")
-            gt_images = prepare_camera_images(
+            gt_images = prepare_rgb_images(
                 sample["future_images"],
                 image_size=config.image_size,
                 center_crop=config.center_crop,

@@ -56,18 +56,22 @@ The active training configuration targets a LeRobot v3-style dual-arm dataset wi
 - a 20D robot state;
 - a 20D action;
 - three RGB views: head, left wrist, and right wrist;
-- four tactile views: two sensors per arm;
+- four raw tactile views: two sensors per arm, merged into one condition image per arm;
 - task text stored in `meta/tasks.parquet`.
+
+The active model uses 11 latent slots:
+`blank, proprio, 3 current RGB, 2 merged current tactile, action, 3 future RGB`.
+Future proprioception and future tactile prediction are not part of this policy.
 
 The experiment name is:
 
 ```text
-cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile
+cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot
 ```
 
-The former `earbud` module, experiment, and class names remain available as
-compatibility aliases. Existing checkpoints are model-compatible and do not
-need conversion. New statistics are written as
+The former `earbud` names remain only as import/config-name aliases. This
+11-slot policy does not support checkpoints trained with the former 18-slot
+layout. New statistics are written as
 `dataset_statistics_lerobot_bi_flexiv.json`; if only the former statistics
 filename exists, the dataset loader reads it automatically.
 
@@ -258,7 +262,7 @@ ls -lh \
 python -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py \
   --dryrun -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
@@ -278,7 +282,7 @@ torchrun \
   --nproc_per_node=8 \
   -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
@@ -335,7 +339,7 @@ torchrun \
   --nproc_per_node=8 \
   -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
-  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile \
+  experiment=cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   checkpoint.load_path=../checkpoints/path/to/checkpoints/iter_000100000 \
@@ -346,6 +350,7 @@ torchrun \
 ```
 
 `trainer.max_iter` is the final total iteration, not the number of additional iterations.
+Only resume training state from a checkpoint produced by this 11-slot configuration.
 
 ### 4.6 CASA attention backend
 
@@ -370,13 +375,16 @@ export DREAMTAC_T5=../pick_up_cube_0713/t5_embeddings.pkl
 export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
 
 python -m cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_server \
-  --config cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only \
+  --config cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only \
   --host 0.0.0.0 \
   --port 8000 \
-  --num-denoising-steps 5
+  --num-denoising-steps 10
 ```
 
-Requests contain a 20D state, three RGB views, four tactile views, and a two-value tactile gate. See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
+Ten denoising steps and diffusion-step residual caching are the defaults. Pass
+`--no-diffusion-step-cache` only for an uncached comparison. Requests contain a
+20D state, three RGB views, four raw tactile views, and a two-value tactile gate.
+See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
 
 ---
 
