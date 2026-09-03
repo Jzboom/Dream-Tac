@@ -15,7 +15,7 @@ def _policy_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
     index = lambda value: torch.full((batch_size,), value, dtype=torch.long)
     zeros = torch.zeros(batch_size, dtype=torch.long)
     return {
-        "actions": torch.zeros(batch_size, 20, 20),
+        "actions": torch.zeros(batch_size, 30, 20),
         "proprio": torch.zeros(batch_size, 20),
         "action_latent_idx": index(7),
         "current_proprio_latent_idx": index(1),
@@ -39,6 +39,18 @@ def test_action_latent_injection_and_extraction_are_exact_inverses() -> None:
     injected = replace_latent_with_action_chunk(latent, action, action_indices)
     extracted = extract_action_chunk_from_latent_sequence(injected, (3, 4), action_indices)
 
+    torch.testing.assert_close(extracted, action)
+
+
+def test_30_step_bi_flexiv_action_chunk_fits_the_real_latent_shape() -> None:
+    action = torch.linspace(-1.0, 1.0, 2 * 30 * 20).reshape(2, 30, 20)
+    action_indices = torch.tensor([7, 7])
+    latent = torch.zeros(2, 16, 11, 28, 28)
+
+    injected = replace_latent_with_action_chunk(latent, action, action_indices)
+    extracted = extract_action_chunk_from_latent_sequence(injected, (30, 20), action_indices)
+
+    assert extracted.shape == (2, 30, 20)
     torch.testing.assert_close(extracted, action)
 
 
@@ -97,7 +109,7 @@ def test_11_slot_loss_without_future_proprio_has_finite_backward() -> None:
         get_per_sigma_loss_weights=lambda sigma: torch.ones_like(sigma),
     )
     batch = _policy_batch()
-    x0 = torch.zeros(1, 1, 11, 20, 20)
+    x0 = torch.zeros(1, 2, 11, 20, 20)
     condition = SimpleNamespace()
     output, elementwise_loss, _, _ = CosmosPolicyDiffusionModel.compute_loss_with_epsilon_and_sigma(
         harness,
@@ -130,4 +142,4 @@ def test_11_slot_loss_without_future_proprio_has_finite_backward() -> None:
     assert torch.isfinite(loss)
     assert parameter.grad is not None
     assert torch.isfinite(parameter.grad)
-    assert output["x0"].shape == (1, 1, 11, 20, 20)
+    assert output["x0"].shape == (1, 2, 11, 20, 20)

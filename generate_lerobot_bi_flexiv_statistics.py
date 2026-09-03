@@ -10,7 +10,7 @@ def main() -> None:
     LeRobotBiFlexivDataset(
         data_dir=str(data_dir),
         t5_text_embeddings_path="",
-        chunk_size=20,
+        chunk_size=30,
         gripper_start_idx=18,
         normalization_mode="q99",
         normalize_actions=True,

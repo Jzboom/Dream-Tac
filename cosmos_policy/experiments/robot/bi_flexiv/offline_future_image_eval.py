@@ -23,7 +23,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", type=int, default=0, help="First episode timestep")
     parser.add_argument("--end", type=int, default=-1, help="Exclusive end; -1 uses the last full future horizon")
     parser.add_argument("--stride", type=int, default=CHUNK_SIZE, help="Inference stride in dataset timesteps")
-    parser.add_argument("--include-padded-future", action="store_true", help="Also evaluate starts whose t+20 GT is clamped")
+    parser.add_argument(
+        "--include-padded-future",
+        action="store_true",
+        help=f"Also evaluate starts whose t+{CHUNK_SIZE} GT is clamped",
+    )
     parser.add_argument("--output-dir", default="./bi_flexiv_future_comparisons")
     parser.add_argument(
         "--config",

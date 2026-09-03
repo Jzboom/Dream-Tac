@@ -42,7 +42,10 @@ Training and inference call the same preprocessing function.
 ```
 
 Legacy numeric tactile keys (`left_tactile_0`, etc.) are also accepted. The
-response contains a `(20, 20)` action chunk and timing information.
+response contains a `(30, 20)` action chunk and timing information. The three
+future RGB outputs represent the single `t+30` frame, approximately one second
+after the current observation for 30 Hz data. The client-side
+`ActionChunkBroker` must also use `action_horizon=30`.
 
 ## Start server
 

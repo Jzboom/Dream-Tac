@@ -9,6 +9,7 @@ from cosmos_policy._src.predict2.conditioner import DataType
 from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import (
     ACTION_LATENT_IDX,
     CAMERA_KEYS,
+    CHUNK_SIZE,
     NUM_CONDITIONAL_FRAMES,
     PIXEL_FRAMES,
     STATE_T,
@@ -52,6 +53,7 @@ def test_default_policy_contract_is_11_slot_10_step_cached() -> None:
     assert NUM_CONDITIONAL_FRAMES == 7
     assert ACTION_LATENT_IDX == 7
     assert PIXEL_FRAMES == 41
+    assert CHUNK_SIZE == 30
     assert config.num_denoising_steps == 10
     assert config.diffusion_step_cache is True
 

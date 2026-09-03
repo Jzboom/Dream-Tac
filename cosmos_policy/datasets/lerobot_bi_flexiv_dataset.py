@@ -129,7 +129,7 @@ class LeRobotBiFlexivDataset(Dataset):
         self,
         data_dir: str,
         is_train: bool = True,
-        chunk_size: int = 20,
+        chunk_size: int = 30,
         final_image_size: int = 224,
         t5_text_embeddings_path: str = "",
         normalize_images: bool = False,

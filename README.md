@@ -228,10 +228,14 @@ Output:
 The statistics use the training defaults:
 
 ```text
-chunk_size=20
+chunk_size=30
 gripper_start_idx=18
 normalization_mode=q99
 ```
+
+The action chunk and future RGB target use the same horizon. At the dataset's
+30 Hz sampling rate, the future RGB target is the single frame at `t+30`
+(approximately one second after the current observation).
 
 If the statistics file is missing, training can generate it automatically. Pre-generating it avoids every distributed rank computing the same statistics during startup.
 
@@ -384,6 +388,8 @@ python -m cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_server \
 Ten denoising steps and diffusion-step residual caching are the defaults. Pass
 `--no-diffusion-step-cache` only for an uncached comparison. Requests contain a
 20D state, three RGB views, four raw tactile views, and a two-value tactile gate.
+Configure the client-side `ActionChunkBroker` with `action_horizon=30` to match
+the server response.
 See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
 
 ---
