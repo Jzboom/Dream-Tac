@@ -22,6 +22,7 @@ from cosmos_policy.experiments.robot.openloop_hard_residual_cache import (
     minimal_v4_dit_forward_with_hard_block_cache,
     reset_openloop_denoise_counter,
 )
+from cosmos_policy.experiments.robot.cosmos_utils import apply_image_transforms
 
 
 CLIENT_CAMERA_KEYS = (
@@ -70,6 +71,17 @@ def test_prepare_camera_images_merges_each_raw_tactile_pair() -> None:
     np.testing.assert_array_equal(images["left_tactile_merged"][:, 210:], 0)
     np.testing.assert_array_equal(images["left_tactile_merged"][40, 40], np.full(3, 4, dtype=np.uint8))
     np.testing.assert_array_equal(images["left_tactile_merged"][180, 40], np.full(3, 5, dtype=np.uint8))
+
+
+def test_prepare_camera_images_center_crops_merged_tactile_like_training() -> None:
+    uncropped = prepare_camera_images(_raw_images(), center_crop=False)
+    cropped = prepare_camera_images(_raw_images(), center_crop=True)
+    expected = apply_image_transforms(
+        np.stack([uncropped["left_tactile_merged"], uncropped["right_tactile_merged"]], axis=0)
+    )
+
+    np.testing.assert_array_equal(cropped["left_tactile_merged"], expected[0])
+    np.testing.assert_array_equal(cropped["right_tactile_merged"], expected[1])
 
 
 def test_build_pixel_video_uses_only_the_fixed_11_slot_layout() -> None:

@@ -281,7 +281,10 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             action_indices=data_batch["action_latent_idx"],
             proprio=data_batch["proprio"],
             current_proprio_indices=data_batch["current_proprio_latent_idx"],
-            future_proprio=data_batch["future_proprio"],
+            # Some policy layouts (including bi_flexiv 11-slot) intentionally
+            # omit future proprio while retaining a -1 index for the common
+            # model contract.
+            future_proprio=data_batch.get("future_proprio"),
             future_proprio_indices=data_batch["future_proprio_latent_idx"],
             future_wrist_image_indices=data_batch["future_wrist_image_latent_idx"],
             future_wrist_image2_indices=(
@@ -326,7 +329,7 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
         action_indices: torch.Tensor,
         proprio: torch.Tensor,
         current_proprio_indices: torch.Tensor,
-        future_proprio: torch.Tensor,
+        future_proprio: Optional[torch.Tensor],
         future_proprio_indices: torch.Tensor,
         future_wrist_image_indices: torch.Tensor,
         future_wrist_image2_indices: Optional[torch.Tensor],
@@ -403,7 +406,9 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                 proprio_indices=current_proprio_indices,
             )
         # Future proprio
-        if torch.all(future_proprio_indices != -1):  # -1 indicates future proprio is not used
+        if future_proprio is not None and torch.all(
+            future_proprio_indices != -1
+        ):  # -1 indicates future proprio is not used
             x0_B_C_T_H_W = replace_latent_with_proprio(
                 x0_B_C_T_H_W,
                 future_proprio,

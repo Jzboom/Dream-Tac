@@ -325,7 +325,7 @@ The example above writes to:
 ```text
 ../checkpoints/
 └── cosmos_policy_lerobot_pick_up_cube/
-    └── cosmos_v2_finetune/
+    └── wam_11slot_finetune/
         └── pick_up_cube_0713_tactile_8gpu_gbs8_v1/
             └── checkpoints/
 ```

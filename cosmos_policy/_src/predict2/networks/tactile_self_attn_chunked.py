@@ -152,6 +152,22 @@ def _flashbias_sdpa_full(
     total = d_h + r_b
     pad = (8 - (total % 8)) % 8
 
+    # PyTorch's CUDA FlashAttention requires Q, K, and V to have the same
+    # head dimension.  The rank-1 FlashBias feature makes Q/K wider than V;
+    # append zero value channels as well and discard their identically-zero
+    # outputs afterwards.  Without this, SDPA rejects the flash kernel and
+    # silently falls back to a much slower backend under the default policy.
+    attention_dim = total + pad
+    value_pad = attention_dim - v.shape[-1]
+    if value_pad < 0:
+        raise ValueError(
+            f"FlashBias attention dimension {attention_dim} is smaller than value dimension {v.shape[-1]}"
+        )
+    if value_pad:
+        v_attention = F.pad(v, (0, value_pad))
+    else:
+        v_attention = v
+
     def _run(q_cat: torch.Tensor, k_cat: torch.Tensor) -> torch.Tensor:
         backends = _sdp_priority_from_env()
         if backends is not None:
@@ -160,7 +176,7 @@ def _flashbias_sdpa_full(
                     return F.scaled_dot_product_attention(
                         q_cat,
                         k_cat,
-                        v,
+                        v_attention,
                         attn_mask=None,
                         dropout_p=0.0,
                         scale=1.0,
@@ -171,7 +187,7 @@ def _flashbias_sdpa_full(
         return F.scaled_dot_product_attention(
             q_cat,
             k_cat,
-            v,
+            v_attention,
             attn_mask=None,
             dropout_p=0.0,
             scale=1.0,
@@ -186,6 +202,7 @@ def _flashbias_sdpa_full(
             torch.cat([q * softmax_scale, qb, blank], dim=-1),
             torch.cat([k, kb, blank], dim=-1),
         )
+    out = out[..., : v.shape[-1]]
     return out.transpose(1, 2).contiguous()
 
 

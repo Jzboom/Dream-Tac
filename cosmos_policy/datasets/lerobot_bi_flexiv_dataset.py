@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from glob import glob
 from typing import Any, Literal
 
+import av
 import cv2
 import numpy as np
 import pandas as pd
@@ -32,6 +33,13 @@ from cosmos_policy.datasets.dataset_common import get_action_chunk_with_padding
 from cosmos_policy.datasets.dataset_utils import preprocess_image
 from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
 from cosmos_policy.utils.tactile_self_attn_gate import scalar_gate_from_raw
+
+
+# Never touch a decoder inherited across ``fork``.  libavcodec may have worker
+# threads and locks that no longer exist in the child, so even calling close()
+# can deadlock.  Keep the stale Python objects alive until multiprocessing
+# terminates the worker process; the OS then releases their file descriptors.
+_FORK_INHERITED_VIDEO_CACHES: list[OrderedDict[str, Any]] = []
 
 
 def build_observation_relative_action_chunk(
@@ -181,7 +189,11 @@ class LeRobotBiFlexivDataset(Dataset):
 
         self._data_file_cache: dict[tuple[int, int], dict[str, np.ndarray]] = {}
         self._episode_array_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        self._video_capture_cache: OrderedDict[str, cv2.VideoCapture] = OrderedDict()
+        # PyAV/libdav1d is required here.  OpenCV's bundled FFmpeg can open the
+        # LeRobot AV1 containers but fails on random seeks with "Missing
+        # Sequence Header", which makes shuffled training crash nondeterministically.
+        self._video_container_cache: OrderedDict[str, Any] = OrderedDict()
+        self._video_cache_pid = os.getpid()
 
         self.info = self._load_info()
         self.fps = int(self.info.get("fps", 30))
@@ -206,7 +218,10 @@ class LeRobotBiFlexivDataset(Dataset):
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
-        state["_video_capture_cache"] = OrderedDict()
+        # AV containers are process-local and cannot be pickled into DataLoader
+        # workers.  Every worker lazily opens its own bounded cache.
+        state["_video_container_cache"] = OrderedDict()
+        state["_video_cache_pid"] = None
         return state
 
     def __len__(self) -> int:
@@ -366,10 +381,11 @@ class LeRobotBiFlexivDataset(Dataset):
         }
 
     def close(self) -> None:
-        """Release cached OpenCV video handles."""
-        for capture in self._video_capture_cache.values():
-            capture.release()
-        self._video_capture_cache.clear()
+        """Release cached PyAV video containers."""
+        for container in getattr(self, "_video_container_cache", {}).values():
+            container.close()
+        if hasattr(self, "_video_container_cache"):
+            self._video_container_cache.clear()
 
     def __del__(self) -> None:
         try:
@@ -590,56 +606,88 @@ class LeRobotBiFlexivDataset(Dataset):
             f"file-{ref.file_index:03d}.mp4",
         )
 
-    def _cache_capture(self, path: str, cap: cv2.VideoCapture) -> cv2.VideoCapture:
-        self._video_capture_cache[path] = cap
-        if len(self._video_capture_cache) > self.max_open_videos:
-            _old_path, old_cap = self._video_capture_cache.popitem(last=False)
-            old_cap.release()
-        return cap
+    def _cache_container(self, path: str, container: Any) -> Any:
+        self._video_container_cache[path] = container
+        if len(self._video_container_cache) > self.max_open_videos:
+            _old_path, old_container = self._video_container_cache.popitem(last=False)
+            old_container.close()
+        return container
 
-    def _drop_capture(self, path: str) -> None:
-        cap = self._video_capture_cache.pop(path, None)
-        if cap is not None:
-            cap.release()
+    def _drop_container(self, path: str) -> None:
+        container = self._video_container_cache.pop(path, None)
+        if container is not None:
+            container.close()
 
-    def _open_capture_with_retry(self, path: str, retries: int = 5) -> cv2.VideoCapture:
-        last_error = None
+    def _open_container_with_retry(self, path: str, retries: int = 5) -> Any:
+        last_error: Exception | None = None
         for attempt in range(retries):
-            cap = cv2.VideoCapture(path)
-            if cap.isOpened():
-                return cap
-            cap.release()
-            last_error = f"attempt {attempt + 1}/{retries} failed"
-            time.sleep(min(0.25 * (attempt + 1), 1.0))
+            try:
+                container = av.open(path, mode="r")
+                if not container.streams.video:
+                    container.close()
+                    raise ValueError("container has no video stream")
+                return container
+            except Exception as error:
+                last_error = error
+                time.sleep(min(0.25 * (attempt + 1), 1.0))
         exists = os.path.exists(path)
         size = os.path.getsize(path) if exists else -1
         raise ValueError(
-            f"Could not open video file after {retries} retries: {path} exists={exists} size={size} ({last_error})"
-        )
+            f"Could not open video file after {retries} retries: {path} "
+            f"exists={exists} size={size} ({last_error})"
+        ) from last_error
 
-    def _get_capture(self, path: str) -> cv2.VideoCapture:
-        cap = self._video_capture_cache.get(path)
-        if cap is not None and cap.isOpened():
-            self._video_capture_cache.move_to_end(path)
-            return cap
-        self._drop_capture(path)
-        return self._cache_capture(path, self._open_capture_with_retry(path))
+    def _get_container(self, path: str) -> Any:
+        current_pid = os.getpid()
+        if self._video_cache_pid != current_pid:
+            # DataLoader normally forks workers on Linux.  A container opened
+            # in the parent must never be reused by a child process because
+            # libavformat decoder state and file offsets are not fork-safe.
+            if self._video_container_cache:
+                _FORK_INHERITED_VIDEO_CACHES.append(self._video_container_cache)
+            self._video_container_cache = OrderedDict()
+            self._video_cache_pid = current_pid
+        container = self._video_container_cache.get(path)
+        if container is not None:
+            self._video_container_cache.move_to_end(path)
+            return container
+        return self._cache_container(path, self._open_container_with_retry(path))
+
+    def _decode_frame(self, container: Any, frame_idx: int, path: str) -> np.ndarray:
+        stream = container.streams.video[0]
+        if stream.time_base is None:
+            raise ValueError(f"Video stream has no time base: {path}")
+        start_pts = int(stream.start_time or 0)
+        time_base = float(stream.time_base)
+        target_pts = start_pts + int(round((frame_idx / self.fps) / time_base))
+        container.seek(target_pts, stream=stream, backward=True, any_frame=False)
+
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            decoded_idx = int(round((int(frame.pts) - start_pts) * time_base * self.fps))
+            if decoded_idx < frame_idx:
+                continue
+            if decoded_idx != frame_idx:
+                raise ValueError(
+                    f"Seek skipped requested frame {frame_idx} and reached {decoded_idx} in {path}"
+                )
+            return np.ascontiguousarray(frame.to_ndarray(format="rgb24"))
+        raise ValueError(f"Decoder reached EOF before frame {frame_idx} in {path}")
 
     def _read_frame(self, episode: _EpisodeRef, video_key: str, relative_step_idx: int) -> np.ndarray:
         ref = episode.videos[video_key]
         frame_idx = ref.from_frame + relative_step_idx
         path = self._video_path(ref)
         for attempt in range(2):
-            cap = self._get_capture(path)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame_bgr = cap.read()
-            if ret:
-                return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            self._drop_capture(path)
+            try:
+                return self._decode_frame(self._get_container(path), frame_idx, path)
+            except Exception:
+                self._drop_container(path)
+                if attempt == 1:
+                    raise
             time.sleep(0.1 * (attempt + 1))
-        raise ValueError(
-            f"Could not read {video_key} frame {frame_idx} for episode {episode.episode_index} from {path}"
-        )
+        raise AssertionError("unreachable")
 
     def _compute_per_arm_tactile_gate(
         self,

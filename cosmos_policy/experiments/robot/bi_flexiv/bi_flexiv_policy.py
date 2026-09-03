@@ -212,6 +212,12 @@ def prepare_camera_images(
     )
     if jpeg_quality is not None:
         merged_stack = apply_jpeg_compression_np(merged_stack, quality=jpeg_quality)
+    if center_crop:
+        # Training applies the same 90%-area resized crop augmentation to RGB
+        # and merged tactile frames.  At inference use the deterministic center
+        # counterpart for both modalities; otherwise tactile sees a different
+        # spatial distribution between training and deployment.
+        merged_stack = apply_image_transforms(merged_stack)
     images.update(
         {name: np.ascontiguousarray(merged_stack[index]) for index, name in enumerate(_MERGED_TACTILE_KEYS)}
     )
