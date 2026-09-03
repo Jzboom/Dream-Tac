@@ -4,10 +4,10 @@
 """
 LeRobot v3 loader for the dual-arm bi_flexiv platform.
 
-The sequence uses 18 latent slots:
-blank, proprio, 3 current RGB views, 4 current tactile views, action,
-future proprio, 3 future RGB views, 4 future tactile views.
-With the WAN2.1 temporal compression factor of 4 this becomes 69 pixel frames.
+The sequence uses 11 latent slots:
+blank, proprio, 3 current RGB views, 2 merged current tactile views, action,
+and 3 future RGB views. With the WAN2.1 temporal compression factor of 4
+this becomes 41 pixel frames.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ from tqdm import tqdm
 
 from cosmos_policy.datasets.dataset_common import get_action_chunk_with_padding
 from cosmos_policy.datasets.dataset_utils import preprocess_image
+from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
 from cosmos_policy.utils.tactile_self_attn_gate import scalar_gate_from_raw
+
 
 def build_observation_relative_action_chunk(
     raw_actions: np.ndarray,
@@ -86,6 +88,10 @@ class _EpisodeRef:
 class LeRobotBiFlexivDataset(Dataset):
     """Direct LeRobot parquet/mp4 dataset for the dual-arm bi_flexiv platform."""
 
+    NUM_LATENT_SLOTS = 11
+    NUM_CONDITIONAL_SLOTS = 7
+    PIXEL_FRAMES = 41
+
     VISION_KEYS = (
         "observation.images.head",
         "observation.images.left_wrist",
@@ -104,19 +110,12 @@ class LeRobotBiFlexivDataset(Dataset):
     CURRENT_HEAD_IDX = 2
     CURRENT_LEFT_WRIST_IDX = 3
     CURRENT_RIGHT_WRIST_IDX = 4
-    CURRENT_LEFT_TACTILE_0_IDX = 5
-    CURRENT_LEFT_TACTILE_1_IDX = 6
-    CURRENT_RIGHT_TACTILE_0_IDX = 7
-    CURRENT_RIGHT_TACTILE_1_IDX = 8
-    ACTION_IDX = 9
-    FUTURE_PROPRIO_IDX = 10
-    FUTURE_HEAD_IDX = 11
-    FUTURE_LEFT_WRIST_IDX = 12
-    FUTURE_RIGHT_WRIST_IDX = 13
-    FUTURE_LEFT_TACTILE_0_IDX = 14
-    FUTURE_LEFT_TACTILE_1_IDX = 15
-    FUTURE_RIGHT_TACTILE_0_IDX = 16
-    FUTURE_RIGHT_TACTILE_1_IDX = 17
+    CURRENT_LEFT_TACTILE_IDX = 5
+    CURRENT_RIGHT_TACTILE_IDX = 6
+    ACTION_IDX = 7
+    FUTURE_HEAD_IDX = 8
+    FUTURE_LEFT_WRIST_IDX = 9
+    FUTURE_RIGHT_WRIST_IDX = 10
 
     def __init__(
         self,
@@ -159,6 +158,8 @@ class LeRobotBiFlexivDataset(Dataset):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.final_image_size = final_image_size
+        if self.final_image_size != 224:
+            raise ValueError(f"The merged-tactile layout requires final_image_size=224, got {self.final_image_size}")
         self.t5_text_embeddings_path = t5_text_embeddings_path
         self.normalize_images = normalize_images
         self.normalize_actions = normalize_actions
@@ -170,6 +171,11 @@ class LeRobotBiFlexivDataset(Dataset):
         self.use_stronger_image_aug = use_stronger_image_aug
         self.use_proprio = use_proprio
         self.num_duplicates_per_image = num_duplicates_per_image
+        if self.num_duplicates_per_image != 4:
+            raise ValueError(
+                "The WAN temporal layout requires num_duplicates_per_image=4, "
+                f"got {self.num_duplicates_per_image}"
+            )
         self.gripper_start_idx = gripper_start_idx
         self.max_open_videos = max_open_videos
 
@@ -239,9 +245,17 @@ class LeRobotBiFlexivDataset(Dataset):
             )
 
         current_frames = {key: self._read_frame(episode, key, relative_step_idx) for key in self.VIDEO_KEYS}
-        future_frames = {key: self._read_frame(episode, key, future_frame_idx) for key in self.VIDEO_KEYS}
+        future_frames = {key: self._read_frame(episode, key, future_frame_idx) for key in self.VISION_KEYS}
 
         left_gate, right_gate = self._compute_per_arm_tactile_gate(episode, relative_step_idx, current_frames)
+        left_tactile = merge_tactile_pair_vertical(
+            current_frames["observation.images.left_tactile_0"],
+            current_frames["observation.images.left_tactile_1"],
+        )
+        right_tactile = merge_tactile_pair_vertical(
+            current_frames["observation.images.right_tactile_0"],
+            current_frames["observation.images.right_tactile_1"],
+        )
 
         blank = np.zeros_like(current_frames["observation.images.head"])
         unique_frames = [
@@ -250,21 +264,16 @@ class LeRobotBiFlexivDataset(Dataset):
             current_frames["observation.images.head"],
             current_frames["observation.images.left_wrist"],
             current_frames["observation.images.right_wrist"],
-            current_frames["observation.images.left_tactile_0"],
-            current_frames["observation.images.left_tactile_1"],
-            current_frames["observation.images.right_tactile_0"],
-            current_frames["observation.images.right_tactile_1"],
-            blank,
+            left_tactile,
+            right_tactile,
             blank,
             future_frames["observation.images.head"],
             future_frames["observation.images.left_wrist"],
             future_frames["observation.images.right_wrist"],
-            future_frames["observation.images.left_tactile_0"],
-            future_frames["observation.images.left_tactile_1"],
-            future_frames["observation.images.right_tactile_0"],
-            future_frames["observation.images.right_tactile_1"],
         ]
-        repeats = [1] + [self.num_duplicates_per_image] * 17
+        if len(unique_frames) != self.NUM_LATENT_SLOTS:
+            raise RuntimeError(f"Expected {self.NUM_LATENT_SLOTS} latent slots, got {len(unique_frames)}")
+        repeats = [1] + [self.num_duplicates_per_image] * (len(unique_frames) - 1)
         unique_frames = [self._resize_frame_for_stack(frame) for frame in unique_frames]
         images = preprocess_image(
             np.stack(unique_frames, axis=0),
@@ -274,22 +283,14 @@ class LeRobotBiFlexivDataset(Dataset):
             stronger_image_aug=self.use_stronger_image_aug,
         )
         images = torch.repeat_interleave(images, torch.as_tensor(repeats, dtype=torch.long), dim=1)
+        if images.shape[1] != self.PIXEL_FRAMES:
+            raise RuntimeError(f"Expected {self.PIXEL_FRAMES} pixel frames, got {images.shape[1]}")
 
         if episode.command not in self.t5_text_embeddings:
             raise KeyError(
                 f"Missing T5 embedding for command {episode.command!r}. "
                 "Run cosmos_policy.datasets.save_lerobot_t5_text_embeddings first."
             )
-
-        future_tactile_indices = torch.tensor(
-            [
-                self.FUTURE_LEFT_TACTILE_0_IDX,
-                self.FUTURE_LEFT_TACTILE_1_IDX,
-                self.FUTURE_RIGHT_TACTILE_0_IDX,
-                self.FUTURE_RIGHT_TACTILE_1_IDX,
-            ],
-            dtype=torch.long,
-        )
 
         return {
             "video": images,
@@ -303,9 +304,6 @@ class LeRobotBiFlexivDataset(Dataset):
             "proprio": normalized_proprio[relative_step_idx]
             if self.use_proprio
             else np.zeros_like(normalized_proprio[relative_step_idx]),
-            "future_proprio": normalized_proprio[future_frame_idx]
-            if self.use_proprio
-            else np.zeros_like(normalized_proprio[future_frame_idx]),
             "__key__": idx,
             "value_function_return": float("-100"),
             "next_value_function_return": float("-100"),
@@ -320,14 +318,10 @@ class LeRobotBiFlexivDataset(Dataset):
             "current_wrist_image_latent_idx": self.CURRENT_LEFT_WRIST_IDX,
             "current_wrist_image2_latent_idx": self.CURRENT_RIGHT_WRIST_IDX,
             "current_image_latent_idx": self.CURRENT_HEAD_IDX,
-            "future_proprio_latent_idx": self.FUTURE_PROPRIO_IDX if self.use_proprio else -1,
+            "future_proprio_latent_idx": -1,
             "future_wrist_image_latent_idx": self.FUTURE_LEFT_WRIST_IDX,
             "future_wrist_image2_latent_idx": self.FUTURE_RIGHT_WRIST_IDX,
             "future_image_latent_idx": self.FUTURE_HEAD_IDX,
-            "future_tactile_latent_indices": future_tactile_indices,
-            # Compatibility summary metrics for existing two-tactile logging code.
-            "future_tactile_left_latent_idx": torch.tensor(self.FUTURE_LEFT_TACTILE_0_IDX, dtype=torch.long),
-            "future_tactile_right_latent_idx": torch.tensor(self.FUTURE_RIGHT_TACTILE_0_IDX, dtype=torch.long),
             "tactile_self_attn_gate": torch.tensor([left_gate, right_gate], dtype=torch.float32),
         }
 
@@ -350,7 +344,7 @@ class LeRobotBiFlexivDataset(Dataset):
         _, raw_proprio = self._get_episode_arrays(episode)
         future_step_idx = min(relative_step_idx + self.chunk_size, episode.length - 1)
         current_frames = {key: self._read_frame(episode, key, relative_step_idx) for key in self.VIDEO_KEYS}
-        future_frames = {key: self._read_frame(episode, key, future_step_idx) for key in self.VIDEO_KEYS}
+        future_frames = {key: self._read_frame(episode, key, future_step_idx) for key in self.VISION_KEYS}
         left_gate, right_gate = self._compute_per_arm_tactile_gate(episode, relative_step_idx, current_frames)
 
         def _short_names(frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

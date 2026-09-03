@@ -38,7 +38,7 @@ lerobot_bi_flexiv_dataset = L(LeRobotBiFlexivDataset)(
     max_open_videos=32,
 )
 
-cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile = LazyDict(
+cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot = LazyDict(
     dict(
         defaults=[
             "/experiment/cosmos_predict2_2b_480p_libero",
@@ -49,17 +49,17 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile = LazyDict(
         lerobot_dataset_path=_LEROBOT_BI_FLEXIV_DATA_DIR,
         model=L(CosmosPolicyVideo2WorldModel)(
             config=dict(
-                state_t=18,
-                min_num_conditional_frames=9,
-                max_num_conditional_frames=9,
+                state_t=11,
+                min_num_conditional_frames=7,
+                max_num_conditional_frames=7,
                 tokenizer=dict(
-                    chunk_duration=69,
+                    chunk_duration=41,
                 ),
                 net=dict(
                     use_tactile_self_attn_bias=True,
                     tactile_self_attn_alpha=2.0,
-                    tactile_latent_t_indices=(5, 6, 7, 8, 14, 15, 16, 17),
-                    tactile_latent_gate_groups=(0, 0, 1, 1, 0, 0, 1, 1),
+                    tactile_latent_t_indices=(5, 6),
+                    tactile_latent_gate_groups=(0, 1),
                     tactile_attn_chunk_q=32,
                 ),
             ),
@@ -84,18 +84,18 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile = LazyDict(
         ),
         job=dict(
             project="cosmos_policy_lerobot_bi_flexiv",
-            group="cosmos_v2_finetune",
-            name="cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile",
+            group="wam_11slot_finetune",
+            name="cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot",
             wandb_entity=None,
             wandb_id=None,
         ),
     )
 )
 
-cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only = LazyDict(
+cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only = LazyDict(
     dict(
         defaults=[
-            "/experiment/cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile",
+            "/experiment/cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot",
             "_self_",
         ],
         model=L(CosmosPolicyVideo2WorldModel)(
@@ -107,8 +107,8 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only = LazyDict(
             ),
         ),
         job=dict(
-            group="cosmos_v2_inference",
-            name="cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only",
+            group="wam_11slot_inference",
+            name="cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only",
         ),
     )
 )
@@ -117,8 +117,8 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only = LazyDict(
 def _register_configs() -> None:
     cs = ConfigStore.instance()
     for item in [
-        cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile,
-        cosmos_predict2_2b_480p_lerobot_bi_flexiv_tactile__inference_only,
+        cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot,
+        cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot__inference_only,
     ]:
         experiment_name = item["job"]["name"]
         log.info(f"Registering experiment: {experiment_name}")
