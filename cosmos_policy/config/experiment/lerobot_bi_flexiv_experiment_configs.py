@@ -35,7 +35,7 @@ lerobot_bi_flexiv_dataset = L(LeRobotBiFlexivDataset)(
     return_value_function_returns=False,
     gamma=0.99,
     gripper_start_idx=18,
-    max_open_videos=32,
+    max_open_videos=16,
 )
 
 cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot = LazyDict(
