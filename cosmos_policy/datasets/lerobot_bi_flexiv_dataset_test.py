@@ -5,6 +5,7 @@ import numpy as np
 
 from cosmos_policy.datasets.lerobot_bi_flexiv_dataset import (
     LeRobotBiFlexivDataset,
+    _group_nearby_frame_indices,
     build_observation_relative_action_chunk,
 )
 from cosmos_policy.utils.bi_flexiv_video_layout import (
@@ -110,6 +111,16 @@ def test_inference_future_placeholders_repeat_latest_rgb_history() -> None:
     np.testing.assert_array_equal(frames[37:41, 0, 0, 0], [33, 33, 33, 33])
 
 
+def test_nearby_frame_indices_are_grouped_without_merging_sparse_history() -> None:
+    assert _group_nearby_frame_indices((10, 40, 70, 100, 110, 120, 130, 140)) == (
+        (10,),
+        (40,),
+        (70,),
+        (100, 110, 120, 130, 140),
+    )
+    assert _group_nearby_frame_indices((100, 97, 99, 98, 100)) == ((97, 98, 99, 100),)
+
+
 def test_pyav_decoder_returns_the_exact_requested_frame_after_seek(tmp_path) -> None:
     path = tmp_path / "seek-test.mp4"
     output = av.open(str(path), mode="w")
@@ -135,3 +146,45 @@ def test_pyav_decoder_returns_the_exact_requested_frame_after_seek(tmp_path) -> 
     assert decoded.shape == (16, 16, 3)
     assert decoded.dtype == np.uint8
     assert abs(float(decoded.mean()) - 70.0) < 5.0
+
+
+def test_pyav_decoder_reads_multiple_targets_after_one_seek(tmp_path) -> None:
+    path = tmp_path / "multi-frame-seek-test.mp4"
+    output = av.open(str(path), mode="w")
+    stream = output.add_stream("mpeg4", rate=10)
+    stream.width = 16
+    stream.height = 16
+    stream.pix_fmt = "yuv420p"
+    for value in range(12):
+        image = np.full((16, 16, 3), value * 10, dtype=np.uint8)
+        frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+        for packet in stream.encode(frame):
+            output.mux(packet)
+    for packet in stream.encode():
+        output.mux(packet)
+    output.close()
+
+    class _CountingContainer:
+        def __init__(self, container):
+            self._container = container
+            self.streams = container.streams
+            self.seek_count = 0
+
+        def seek(self, *args, **kwargs):
+            self.seek_count += 1
+            return self._container.seek(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self._container.decode(*args, **kwargs)
+
+    container = av.open(str(path), mode="r")
+    counting_container = _CountingContainer(container)
+    harness = object.__new__(LeRobotBiFlexivDataset)
+    harness.fps = 10
+    decoded = harness._decode_frames(counting_container, (3, 5, 8), str(path))
+    container.close()
+
+    assert counting_container.seek_count == 1
+    assert tuple(decoded) == (3, 5, 8)
+    for frame_idx, frame in decoded.items():
+        assert abs(float(frame.mean()) - frame_idx * 10.0) < 5.0

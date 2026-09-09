@@ -62,6 +62,37 @@ from cosmos_policy.utils.tactile_self_attn_gate import scalar_gate_from_raw
 # terminates the worker process; the OS then releases their file descriptors.
 _FORK_INHERITED_VIDEO_CACHES: list[OrderedDict[str, Any]] = []
 
+# Decode nearby targets in one forward pass.  This covers the four consecutive
+# tactile frames and the 10-frame-spaced future RGB targets without forcing the
+# sparse 30-frame RGB history offsets into one long decode range.
+_MAX_SEQUENTIAL_DECODE_GAP = max(
+    later - earlier
+    for earlier, later in zip(FUTURE_IMAGE_OFFSETS[:-1], FUTURE_IMAGE_OFFSETS[1:], strict=True)
+)
+
+
+def _group_nearby_frame_indices(
+    frame_indices: tuple[int, ...],
+    *,
+    max_gap: int = _MAX_SEQUENTIAL_DECODE_GAP,
+) -> tuple[tuple[int, ...], ...]:
+    """Partition sorted unique frame indices into short sequential decode runs."""
+    if max_gap < 1:
+        raise ValueError(f"max_gap must be positive, got {max_gap}")
+    unique_indices = sorted(set(frame_indices))
+    if any(frame_idx < 0 for frame_idx in unique_indices):
+        raise ValueError(f"frame indices must be non-negative, got {frame_indices}")
+    if not unique_indices:
+        return ()
+
+    groups: list[list[int]] = [[unique_indices[0]]]
+    for frame_idx in unique_indices[1:]:
+        if frame_idx - groups[-1][-1] <= max_gap:
+            groups[-1].append(frame_idx)
+        else:
+            groups.append([frame_idx])
+    return tuple(tuple(group) for group in groups)
+
 
 def build_observation_relative_action_chunk(
     raw_actions: np.ndarray,
@@ -288,11 +319,12 @@ class LeRobotBiFlexivDataset(Dataset):
                 normalization_mode=self.normalization_mode,
             )
 
-        history_frames = {
-            **{key: self._read_frames(episode, key, rgb_history_indices) for key in self.VISION_KEYS},
-            **{key: self._read_frames(episode, key, tactile_history_indices) for key in self.TACTILE_KEYS},
-        }
-        future_frames = {key: self._read_frames(episode, key, future_indices) for key in self.VISION_KEYS}
+        history_frames, future_frames = self._read_history_and_future_frames(
+            episode,
+            rgb_history_indices=rgb_history_indices,
+            tactile_history_indices=tactile_history_indices,
+            future_indices=future_indices,
+        )
 
         left_gate, right_gate = self._compute_per_arm_tactile_gate(relative_step_idx, history_frames)
         left_tactile = np.stack(
@@ -402,11 +434,12 @@ class LeRobotBiFlexivDataset(Dataset):
             episode.length,
         )
         future_indices = clamped_relative_indices(relative_step_idx, FUTURE_IMAGE_OFFSETS, episode.length)
-        history_frames = {
-            **{key: self._read_frames(episode, key, rgb_history_indices) for key in self.VISION_KEYS},
-            **{key: self._read_frames(episode, key, tactile_history_indices) for key in self.TACTILE_KEYS},
-        }
-        future_frames = {key: self._read_frames(episode, key, future_indices) for key in self.VISION_KEYS}
+        history_frames, future_frames = self._read_history_and_future_frames(
+            episode,
+            rgb_history_indices=rgb_history_indices,
+            tactile_history_indices=tactile_history_indices,
+            future_indices=future_indices,
+        )
         left_gate, right_gate = self._compute_per_arm_tactile_gate(relative_step_idx, history_frames)
 
         def _short_names(frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -708,27 +741,48 @@ class LeRobotBiFlexivDataset(Dataset):
             return container
         return self._cache_container(path, self._open_container_with_retry(path))
 
-    def _decode_frame(self, container: Any, frame_idx: int, path: str) -> np.ndarray:
+    def _decode_frames(
+        self,
+        container: Any,
+        frame_indices: tuple[int, ...],
+        path: str,
+    ) -> dict[int, np.ndarray]:
+        """Decode sorted unique targets after one seek to the first frame."""
+        if not frame_indices:
+            return {}
+        if frame_indices != tuple(sorted(set(frame_indices))):
+            raise ValueError(f"frame_indices must be sorted and unique, got {frame_indices}")
+
         stream = container.streams.video[0]
         if stream.time_base is None:
             raise ValueError(f"Video stream has no time base: {path}")
         start_pts = int(stream.start_time or 0)
         time_base = float(stream.time_base)
-        target_pts = start_pts + int(round((frame_idx / self.fps) / time_base))
+        target_pts = start_pts + int(round((frame_indices[0] / self.fps) / time_base))
         container.seek(target_pts, stream=stream, backward=True, any_frame=False)
 
+        decoded_frames: dict[int, np.ndarray] = {}
+        target_position = 0
         for frame in container.decode(stream):
             if frame.pts is None:
                 continue
             decoded_idx = int(round((int(frame.pts) - start_pts) * time_base * self.fps))
-            if decoded_idx < frame_idx:
+            target_idx = frame_indices[target_position]
+            if decoded_idx < target_idx:
                 continue
-            if decoded_idx != frame_idx:
+            if decoded_idx != target_idx:
                 raise ValueError(
-                    f"Seek skipped requested frame {frame_idx} and reached {decoded_idx} in {path}"
+                    f"Decode skipped requested frame {target_idx} and reached {decoded_idx} in {path}"
                 )
-            return np.ascontiguousarray(frame.to_ndarray(format="rgb24"))
-        raise ValueError(f"Decoder reached EOF before frame {frame_idx} in {path}")
+            decoded_frames[target_idx] = np.ascontiguousarray(frame.to_ndarray(format="rgb24"))
+            target_position += 1
+            if target_position == len(frame_indices):
+                return decoded_frames
+        missing = frame_indices[target_position:]
+        raise ValueError(f"Decoder reached EOF before frames {missing} in {path}")
+
+    def _decode_frame(self, container: Any, frame_idx: int, path: str) -> np.ndarray:
+        return self._decode_frames(container, (frame_idx,), path)[frame_idx]
 
     def _read_frame(self, episode: _EpisodeRef, video_key: str, relative_step_idx: int) -> np.ndarray:
         ref = episode.videos[video_key]
@@ -750,12 +804,57 @@ class LeRobotBiFlexivDataset(Dataset):
         video_key: str,
         relative_step_indices: tuple[int, ...],
     ) -> np.ndarray:
-        """Read a short frame sequence while decoding repeated endpoint padding once."""
-        unique_frames = {
-            step_idx: self._read_frame(episode, video_key, step_idx)
-            for step_idx in dict.fromkeys(relative_step_indices)
+        """Read targets with one seek per nearby group and preserve duplicates/order."""
+        if not relative_step_indices:
+            raise ValueError("relative_step_indices must not be empty")
+
+        ref = episode.videos[video_key]
+        path = self._video_path(ref)
+        decoded_frames: dict[int, np.ndarray] = {}
+        for relative_group in _group_nearby_frame_indices(relative_step_indices):
+            absolute_group = tuple(ref.from_frame + step_idx for step_idx in relative_group)
+            for attempt in range(2):
+                try:
+                    absolute_frames = self._decode_frames(self._get_container(path), absolute_group, path)
+                    decoded_frames.update(
+                        {
+                            relative_idx: absolute_frames[absolute_idx]
+                            for relative_idx, absolute_idx in zip(relative_group, absolute_group, strict=True)
+                        }
+                    )
+                    break
+                except Exception:
+                    self._drop_container(path)
+                    if attempt == 1:
+                        raise
+                time.sleep(0.1 * (attempt + 1))
+
+        return np.stack([decoded_frames[step_idx] for step_idx in relative_step_indices], axis=0)
+
+    def _read_history_and_future_frames(
+        self,
+        episode: _EpisodeRef,
+        *,
+        rgb_history_indices: tuple[int, ...],
+        tactile_history_indices: tuple[int, ...],
+        future_indices: tuple[int, ...],
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """Read each RGB stream once for its combined history/future targets."""
+        num_history_frames = len(rgb_history_indices)
+        combined_rgb_indices = rgb_history_indices + future_indices
+        combined_rgb_frames = {
+            key: self._read_frames(episode, key, combined_rgb_indices) for key in self.VISION_KEYS
         }
-        return np.stack([unique_frames[step_idx] for step_idx in relative_step_indices], axis=0)
+        history_frames = {
+            key: frames[:num_history_frames] for key, frames in combined_rgb_frames.items()
+        }
+        history_frames.update(
+            {key: self._read_frames(episode, key, tactile_history_indices) for key in self.TACTILE_KEYS}
+        )
+        future_frames = {
+            key: frames[num_history_frames:] for key, frames in combined_rgb_frames.items()
+        }
+        return history_frames, future_frames
 
     def _compute_per_arm_tactile_gate(
         self,
