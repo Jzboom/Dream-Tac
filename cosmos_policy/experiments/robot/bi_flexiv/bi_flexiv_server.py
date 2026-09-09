@@ -6,7 +6,7 @@ Example:
 
    python -m cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_server \
      --checkpoint /data/dreamtac/checkpoints/iter_000003000 \
-     --stats /data/dreamtac/dataset_statistics_lerobot_bi_flexiv.json \
+     --stats /data/dreamtac/dataset_statistics_lerobot_bi_flexiv_chunk40.json \
      --t5-embeddings /data/dreamtac/t5_embeddings.pkl \
      --wan-vae /data/dreamtac/tokenizer/tokenizer.pth \
      --default-prompt "the exact training task text"

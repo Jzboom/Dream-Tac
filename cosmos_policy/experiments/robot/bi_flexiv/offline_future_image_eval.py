@@ -14,6 +14,7 @@ from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import (
     prepare_rgb_images,
 )
 from cosmos_policy.experiments.robot.bi_flexiv.future_image_eval import FutureImageEvaluationWriter
+from cosmos_policy.utils.bi_flexiv_video_layout import FUTURE_IMAGE_OFFSETS
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -112,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
         episode = next((item for item in dataset.episodes if item.episode_index == args.episode_index), None)
         if episode is None:
             parser.error(f"Episode id {args.episode_index} does not exist in {args.data_dir}")
-        default_end = episode.length if args.include_padded_future else max(0, episode.length - CHUNK_SIZE)
+        default_end = episode.length if args.include_padded_future else max(0, episode.length - max(FUTURE_IMAGE_OFFSETS))
         end = default_end if args.end < 0 else min(args.end, episode.length)
         start = max(0, args.start)
         if start >= end:

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import CAMERA_KEYS
+from cosmos_policy.utils.bi_flexiv_video_layout import FUTURE_IMAGE_OFFSETS, RGB_IMAGE_KEYS
 
 
 def _safe_tag(value: str) -> str:
@@ -19,12 +19,13 @@ def _safe_tag(value: str) -> str:
     return tag
 
 
-def _as_rgb_uint8(image: Any, *, camera_name: str) -> np.ndarray:
+def _as_rgb_sequence_uint8(image: Any, *, camera_name: str) -> np.ndarray:
     array = np.asarray(image)
-    if array.ndim == 4 and array.shape[0] == 1:
-        array = array[0]
-    if array.ndim != 3 or array.shape[-1] != 3:
-        raise ValueError(f"Image {camera_name!r} must be HWC RGB, got {array.shape}")
+    if array.ndim != 4 or array.shape[0] != len(FUTURE_IMAGE_OFFSETS) or array.shape[-1] != 3:
+        raise ValueError(
+            f"Images {camera_name!r} must have shape ({len(FUTURE_IMAGE_OFFSETS)}, H, W, 3), "
+            f"got {array.shape}"
+        )
     if array.dtype != np.uint8:
         array = np.clip(np.rint(array), 0, 255).astype(np.uint8)
     return np.ascontiguousarray(array)
@@ -66,15 +67,21 @@ class FutureImageEvaluationWriter:
         tag = _safe_tag(sample_tag)
         comparison_paths: dict[str, str] = {}
 
-        for camera_name in CAMERA_KEYS:
+        for camera_name in RGB_IMAGE_KEYS:
             if camera_name not in predictions or camera_name not in ground_truth:
                 continue
-            pred = _as_rgb_uint8(predictions[camera_name], camera_name=camera_name)
-            gt = _as_rgb_uint8(ground_truth[camera_name], camera_name=camera_name)
+            pred = _as_rgb_sequence_uint8(predictions[camera_name], camera_name=camera_name)
+            gt = _as_rgb_sequence_uint8(ground_truth[camera_name], camera_name=camera_name)
 
-            comparison_path = os.path.join(self.comparisons_dir, f"{tag}_{camera_name}.png")
-            _write_comparison(comparison_path, gt, pred)
-            comparison_paths[camera_name] = os.path.relpath(comparison_path, self.output_dir)
+            for frame_idx, offset in enumerate(FUTURE_IMAGE_OFFSETS):
+                comparison_path = os.path.join(
+                    self.comparisons_dir,
+                    f"{tag}_{camera_name}_step{offset:03d}.png",
+                )
+                _write_comparison(comparison_path, gt[frame_idx], pred[frame_idx])
+                comparison_paths[f"{camera_name}/t+{offset}"] = os.path.relpath(
+                    comparison_path, self.output_dir
+                )
 
         if not comparison_paths:
             raise ValueError("Prediction and GT mappings have no camera keys in common")

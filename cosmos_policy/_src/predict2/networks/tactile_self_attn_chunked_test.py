@@ -9,6 +9,7 @@ from torch import nn
 from cosmos_policy._src.predict2.networks.minimal_v4_dit import MiniTrainDIT
 from cosmos_policy._src.predict2.networks.tactile_self_attn_chunked import (
     _flashbias_sdpa_full,
+    block_causal_attention,
     self_attention_with_tactile_outer_bias_chunked,
 )
 
@@ -18,6 +19,7 @@ def _run_attention(
     monkeypatch,
     inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     projection: nn.Linear,
+    condition_prefix_tokens: int = 0,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     monkeypatch.setenv("COSMOS_TACTILE_SELF_ATTN_BACKEND", backend)
     q, k, v = (tensor.detach().clone().requires_grad_(True) for tensor in inputs)
@@ -39,6 +41,7 @@ def _run_attention(
         chunk_q=2,
         output_proj=projection,
         output_dropout=nn.Identity(),
+        condition_prefix_tokens=condition_prefix_tokens,
     )
     gradients = torch.autograd.grad(output.square().sum(), (q, k, v, *projection.parameters()))
     return output.detach(), tuple(gradient.detach() for gradient in gradients)
@@ -53,6 +56,23 @@ def test_flashbias_matches_eager_forward_and_backward(monkeypatch) -> None:
     flash_output, flash_gradients = _run_attention("flashbias_sdpa", monkeypatch, inputs, projection)
 
     # CPU SDPA may internally use float32 accumulation even for float64 input.
+    torch.testing.assert_close(flash_output, eager_output, rtol=1e-6, atol=1e-7)
+    for flash_gradient, eager_gradient in zip(flash_gradients, eager_gradients):
+        torch.testing.assert_close(flash_gradient, eager_gradient, rtol=1e-5, atol=2e-7)
+
+
+def test_block_causal_flashbias_matches_eager_forward_and_backward(monkeypatch) -> None:
+    generator = torch.Generator().manual_seed(904)
+    inputs = tuple(torch.randn(2, 6, 2, 4, generator=generator, dtype=torch.float64) for _ in range(3))
+    projection = nn.Linear(8, 8, dtype=torch.float64)
+
+    eager_output, eager_gradients = _run_attention(
+        "eager", monkeypatch, inputs, projection, condition_prefix_tokens=3
+    )
+    flash_output, flash_gradients = _run_attention(
+        "flashbias_sdpa", monkeypatch, inputs, projection, condition_prefix_tokens=3
+    )
+
     torch.testing.assert_close(flash_output, eager_output, rtol=1e-6, atol=1e-7)
     for flash_gradient, eager_gradient in zip(flash_gradients, eager_gradients):
         torch.testing.assert_close(flash_gradient, eager_gradient, rtol=1e-5, atol=2e-7)
@@ -77,6 +97,71 @@ def test_flashbias_pads_value_to_the_same_dimension_as_query_and_key(monkeypatch
     assert seen_dimensions == [(8, 8, 8)]
     assert output.shape == v.shape
     torch.testing.assert_close(output, v)
+
+
+def test_flashbias_uses_separate_query_and_key_padding_for_rectangular_attention(monkeypatch) -> None:
+    seen_shapes: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = []
+
+    def _fake_sdpa(q, k, v, **_kwargs):
+        seen_shapes.append((tuple(q.shape), tuple(k.shape), tuple(v.shape)))
+        return torch.zeros((*q.shape[:-1], v.shape[-1]), dtype=q.dtype)
+
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", _fake_sdpa)
+    q = torch.randn(1, 2, 2, 4)
+    k = torch.randn(1, 5, 2, 4)
+    v = torch.randn_like(k)
+    q_bias = torch.ones(1, 2, 2, 1)
+    k_bias = torch.ones(1, 5, 2, 1)
+
+    output = _flashbias_sdpa_full(q, k, v, q_bias, k_bias, softmax_scale=0.5)
+
+    assert seen_shapes == [((1, 2, 2, 8), (1, 2, 5, 8), (1, 2, 5, 8))]
+    assert output.shape == q.shape
+
+
+def test_block_causal_attention_prevents_prediction_to_condition_information_flow() -> None:
+    generator = torch.Generator().manual_seed(905)
+    q = torch.randn(1, 6, 2, 4, generator=generator)
+    k = torch.randn(1, 6, 2, 4, generator=generator)
+    v = torch.randn(1, 6, 2, 4, generator=generator)
+
+    baseline = block_causal_attention(q, k, v, condition_prefix_tokens=3)
+    perturbed_prediction = block_causal_attention(
+        q,
+        torch.cat((k[:, :3], k[:, 3:] + 100.0), dim=1),
+        torch.cat((v[:, :3], v[:, 3:] + 100.0), dim=1),
+        condition_prefix_tokens=3,
+    )
+    perturbed_condition = block_causal_attention(
+        q,
+        torch.cat((k[:, :3] + 100.0, k[:, 3:]), dim=1),
+        torch.cat((v[:, :3] + 100.0, v[:, 3:]), dim=1),
+        condition_prefix_tokens=3,
+    )
+
+    torch.testing.assert_close(baseline[:, :3], perturbed_prediction[:, :3])
+    assert not torch.allclose(baseline[:, 3:], perturbed_prediction[:, 3:])
+    assert not torch.allclose(baseline[:, 3:], perturbed_condition[:, 3:])
+
+
+def test_block_causal_attention_matches_dense_mask_reference() -> None:
+    generator = torch.Generator().manual_seed(906)
+    q = torch.randn(2, 7, 3, 5, generator=generator, dtype=torch.float64)
+    k = torch.randn(2, 7, 3, 5, generator=generator, dtype=torch.float64)
+    v = torch.randn(2, 7, 3, 5, generator=generator, dtype=torch.float64)
+    prefix = 4
+
+    actual = block_causal_attention(q, k, v, condition_prefix_tokens=prefix)
+    q_bhsd = q.transpose(1, 2)
+    k_bhsd = k.transpose(1, 2)
+    v_bhsd = v.transpose(1, 2)
+    scores = torch.matmul(q_bhsd, k_bhsd.transpose(-2, -1)) * q.shape[-1] ** -0.5
+    allowed = torch.ones(7, 7, dtype=torch.bool)
+    allowed[:prefix, prefix:] = False
+    weights = torch.softmax(scores.masked_fill(~allowed, float("-inf")), dim=-1)
+    expected = torch.matmul(weights, v_bhsd).transpose(1, 2)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
 
 
 def test_grouped_gate_maps_only_to_the_two_merged_tactile_slots() -> None:

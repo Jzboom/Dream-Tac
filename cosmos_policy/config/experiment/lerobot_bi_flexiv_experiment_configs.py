@@ -22,7 +22,7 @@ _LEROBOT_BI_FLEXIV_DATA_DIR = os.environ.get(
 lerobot_bi_flexiv_dataset = L(LeRobotBiFlexivDataset)(
     data_dir="${lerobot_dataset_path}",
     t5_text_embeddings_path="${lerobot_dataset_path}/t5_embeddings.pkl",
-    chunk_size=30,
+    chunk_size=40,
     final_image_size=224,
     normalize_images=False,
     normalize_actions=True,
@@ -56,6 +56,7 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot = LazyDict(
                     chunk_duration=41,
                 ),
                 net=dict(
+                    block_causal_condition_frames=7,
                     use_tactile_self_attn_bias=True,
                     tactile_self_attn_alpha=2.0,
                     tactile_latent_t_indices=(5, 6),

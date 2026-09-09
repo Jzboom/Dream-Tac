@@ -10,7 +10,7 @@ def main() -> None:
     LeRobotBiFlexivDataset(
         data_dir=str(data_dir),
         t5_text_embeddings_path="",
-        chunk_size=30,
+        chunk_size=40,
         gripper_start_idx=18,
         normalization_mode="q99",
         normalize_actions=True,
@@ -19,7 +19,7 @@ def main() -> None:
         use_stronger_image_aug=False,
     )
 
-    print(f"Statistics available at: {data_dir / 'dataset_statistics_lerobot_bi_flexiv.json'}")
+    print(f"Statistics available at: {data_dir / 'dataset_statistics_lerobot_bi_flexiv_chunk40.json'}")
 
 
 if __name__ == "__main__":

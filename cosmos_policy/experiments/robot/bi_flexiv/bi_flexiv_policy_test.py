@@ -18,12 +18,20 @@ from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import (
     build_pixel_video,
     decode_future_images,
     prepare_camera_images,
+    validate_and_prepare_observation,
 )
+from cosmos_policy.experiments.robot.bi_flexiv.future_image_eval import FutureImageEvaluationWriter
+from cosmos_policy.experiments.robot.cosmos_utils import apply_image_transforms
 from cosmos_policy.experiments.robot.openloop_hard_residual_cache import (
     minimal_v4_dit_forward_with_hard_block_cache,
     reset_openloop_denoise_counter,
 )
-from cosmos_policy.experiments.robot.cosmos_utils import apply_image_transforms
+from cosmos_policy.utils.bi_flexiv_video_layout import (
+    FUTURE_IMAGE_OFFSETS,
+    HISTORY_FRAMES,
+    RGB_HISTORY_OFFSETS,
+    TACTILE_HISTORY_OFFSETS,
+)
 
 
 CLIENT_CAMERA_KEYS = (
@@ -40,9 +48,13 @@ CLIENT_CAMERA_KEYS = (
 def _raw_images() -> dict[str, np.ndarray]:
     images: dict[str, np.ndarray] = {}
     for value, name in enumerate(CLIENT_CAMERA_KEYS[:3], start=1):
-        images[name] = np.full((480, 640, 3), value, dtype=np.uint8)
+        images[name] = np.stack(
+            [np.full((480, 640, 3), value + 10 * history_idx, dtype=np.uint8) for history_idx in range(4)]
+        )
     for value, name in enumerate(CLIENT_CAMERA_KEYS[3:], start=4):
-        images[name] = np.full((400, 700, 3), value, dtype=np.uint8)
+        images[name] = np.stack(
+            [np.full((400, 700, 3), value + 10 * history_idx, dtype=np.uint8) for history_idx in range(4)]
+        )
     return images
 
 
@@ -53,9 +65,24 @@ def test_default_policy_contract_is_11_slot_10_step_cached() -> None:
     assert NUM_CONDITIONAL_FRAMES == 7
     assert ACTION_LATENT_IDX == 7
     assert PIXEL_FRAMES == 41
-    assert CHUNK_SIZE == 30
+    assert CHUNK_SIZE == 40
+    assert HISTORY_FRAMES == 4
+    assert RGB_HISTORY_OFFSETS == (-90, -60, -30, 0)
+    assert TACTILE_HISTORY_OFFSETS == (-3, -2, -1, 0)
+    assert FUTURE_IMAGE_OFFSETS == (10, 20, 30, 40)
     assert config.num_denoising_steps == 10
     assert config.diffusion_step_cache is True
+
+
+def test_policy_metadata_exposes_distinct_rgb_and_tactile_history_offsets() -> None:
+    policy = object.__new__(DreamTacBiFlexivPolicy)
+    policy.config = DreamTacBiFlexivPolicyConfig("ckpt", "stats", "t5", "prompt")
+
+    metadata = policy.metadata
+
+    assert "history_offsets" not in metadata
+    assert metadata["rgb_history_offsets"] == (-90, -60, -30, 0)
+    assert metadata["tactile_history_offsets"] == (-3, -2, -1, 0)
 
 
 def test_prepare_camera_images_merges_each_raw_tactile_pair() -> None:
@@ -68,50 +95,83 @@ def test_prepare_camera_images_merges_each_raw_tactile_pair() -> None:
         "left_tactile_merged",
         "right_tactile_merged",
     )
-    assert all(image.shape == (224, 224, 3) for image in images.values())
-    np.testing.assert_array_equal(images["left_tactile_merged"][:, :14], 0)
-    np.testing.assert_array_equal(images["left_tactile_merged"][:, 210:], 0)
-    np.testing.assert_array_equal(images["left_tactile_merged"][40, 40], np.full(3, 4, dtype=np.uint8))
-    np.testing.assert_array_equal(images["left_tactile_merged"][180, 40], np.full(3, 5, dtype=np.uint8))
+    assert all(image.shape == (4, 224, 224, 3) for image in images.values())
+    np.testing.assert_array_equal(images["left_tactile_merged"][:, :, :14], 0)
+    np.testing.assert_array_equal(images["left_tactile_merged"][:, :, 210:], 0)
+    np.testing.assert_array_equal(images["left_tactile_merged"][0, 40, 40], np.full(3, 4, dtype=np.uint8))
+    np.testing.assert_array_equal(images["left_tactile_merged"][3, 180, 40], np.full(3, 35, dtype=np.uint8))
 
 
 def test_prepare_camera_images_center_crops_merged_tactile_like_training() -> None:
     uncropped = prepare_camera_images(_raw_images(), center_crop=False)
     cropped = prepare_camera_images(_raw_images(), center_crop=True)
     expected = apply_image_transforms(
-        np.stack([uncropped["left_tactile_merged"], uncropped["right_tactile_merged"]], axis=0)
-    )
+        np.concatenate([uncropped["left_tactile_merged"], uncropped["right_tactile_merged"]], axis=0)
+    ).reshape(2, 4, 224, 224, 3)
 
     np.testing.assert_array_equal(cropped["left_tactile_merged"], expected[0])
     np.testing.assert_array_equal(cropped["right_tactile_merged"], expected[1])
 
 
-def test_build_pixel_video_uses_only_the_fixed_11_slot_layout() -> None:
+def test_build_pixel_video_uses_history_in_the_fixed_11_slot_layout() -> None:
     images = prepare_camera_images(_raw_images(), center_crop=False)
 
     video = build_pixel_video(images)
 
     assert video.shape == (1, 3, 41, 224, 224)
-    # Slots 5/6 are merged tactile, slot 7 is action, and slots 8--10 are future RGB placeholders.
+    # Slots 2--6 contain histories, slot 7 is blank action, and slots 8--10 repeat current RGB.
+    np.testing.assert_array_equal(video[0, 0, 5:9, 0, 0], [1, 11, 21, 31])
     np.testing.assert_array_equal(video[0, :, 17, :, :14], 0)
     np.testing.assert_array_equal(video[0, :, 21, :, :14], 0)
     np.testing.assert_array_equal(video[0, :, 25], 0)
-    np.testing.assert_array_equal(video[0, :, 29], 1)
-    np.testing.assert_array_equal(video[0, :, 33], 2)
-    np.testing.assert_array_equal(video[0, :, 37], 3)
+    np.testing.assert_array_equal(video[0, 0, 29:33, 0, 0], [31, 31, 31, 31])
+    np.testing.assert_array_equal(video[0, 0, 33:37, 0, 0], [32, 32, 32, 32])
+    np.testing.assert_array_equal(video[0, 0, 37:41, 0, 0], [33, 33, 33, 33])
+
+
+def test_observation_rejects_legacy_single_hwc_frames() -> None:
+    raw_images = {key: value[-1] for key, value in _raw_images().items()}
+    observation = {
+        "state": np.zeros(20, dtype=np.float32),
+        "images": raw_images,
+        "tactile_self_attn_gate": np.zeros(2, dtype=np.float32),
+    }
+
+    with pytest.raises(ValueError, match="THWC"):
+        validate_and_prepare_observation(observation, center_crop=False)
 
 
 def test_decode_future_images_returns_only_three_rgb_views() -> None:
     class _Model:
         @staticmethod
         def decode(latent: torch.Tensor) -> torch.Tensor:
-            return torch.zeros(latent.shape[0], 3, PIXEL_FRAMES, 2, 2, device=latent.device)
+            timeline = (torch.arange(PIXEL_FRAMES, device=latent.device, dtype=torch.float32) + 0.25) / 127.5 - 1.0
+            return timeline.view(1, 1, PIXEL_FRAMES, 1, 1).expand(latent.shape[0], 3, -1, 2, 2)
 
     generated = torch.zeros(1, 16, STATE_T, 1, 1)
     decoded = decode_future_images(_Model(), generated, torch.zeros_like(generated))
 
     assert tuple(decoded) == CAMERA_KEYS[:3]
-    assert all(image.shape == (2, 2, 3) for image in decoded.values())
+    assert all(image.shape == (4, 2, 2, 3) for image in decoded.values())
+    np.testing.assert_array_equal(decoded["head"][:, 0, 0, 0], [29, 30, 31, 32])
+    np.testing.assert_array_equal(decoded["left_wrist"][:, 0, 0, 0], [33, 34, 35, 36])
+    np.testing.assert_array_equal(decoded["right_wrist"][:, 0, 0, 0], [37, 38, 39, 40])
+
+
+def test_future_image_writer_saves_every_camera_and_offset(tmp_path) -> None:
+    images = {
+        name: np.zeros((4, 2, 2, 3), dtype=np.uint8)
+        for name in CAMERA_KEYS[:3]
+    }
+
+    paths = FutureImageEvaluationWriter(str(tmp_path)).save_comparison("sample", images, images)
+
+    assert tuple(paths) == tuple(
+        f"{camera_name}/t+{offset}"
+        for camera_name in CAMERA_KEYS[:3]
+        for offset in FUTURE_IMAGE_OFFSETS
+    )
+    assert all((tmp_path / relative_path).is_file() for relative_path in paths.values())
 
 
 def test_diffusion_cache_rejects_unsupported_step_count_before_loading_model() -> None:

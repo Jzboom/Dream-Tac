@@ -28,7 +28,8 @@ use **concatenated Q/K** so the extra inner-product dimension contributes exactl
 **no float attn_mask** — so PyTorch SDPA can select **Flash / cuDNN FMHA** backends (subject to head
 dim rules: ``(headdim + rank)`` padded to a multiple of 8).
 
-Backend ``flashbias_sdpa``: one fused SDPA over the **full** sequence (``chunk_q`` ignored).
+Backend ``flashbias_sdpa``: one fused SDPA over the **full** sequence, or two
+rectangular calls for block-causal attention (``chunk_q`` ignored).
 
 ## Other backends
 
@@ -140,7 +141,8 @@ def _flashbias_sdpa_full(
     """
     FlashBias SDPA formulation (concat extra dim, scale=1): see FlashBias README / attention_func.flashbias_sdpa.
 
-    q,k,v,q_bias,k_bias: (B, S, H, D) and (B, S, H, 1). Internally uses (B, H, S, *) for F.scaled_dot_product_attention.
+    q/q_bias: (B, Sq, H, D/1); k/v/k_bias: (B, Sk, H, D/D/1).
+    Internally uses (B, H, S, *) for F.scaled_dot_product_attention.
     """
     q = q_bshd.transpose(1, 2)
     k = k_bshd.transpose(1, 2)
@@ -197,10 +199,11 @@ def _flashbias_sdpa_full(
     if pad == 0:
         out = _run(torch.cat([q * softmax_scale, qb], dim=-1), torch.cat([k, kb], dim=-1))
     else:
-        blank = torch.zeros(q.shape[0], q.shape[1], q.shape[2], pad, device=q.device, dtype=q.dtype)
+        q_blank = torch.zeros(q.shape[0], q.shape[1], q.shape[2], pad, device=q.device, dtype=q.dtype)
+        k_blank = torch.zeros(k.shape[0], k.shape[1], k.shape[2], pad, device=k.device, dtype=k.dtype)
         out = _run(
-            torch.cat([q * softmax_scale, qb, blank], dim=-1),
-            torch.cat([k, kb, blank], dim=-1),
+            torch.cat([q * softmax_scale, qb, q_blank], dim=-1),
+            torch.cat([k, kb, k_blank], dim=-1),
         )
     out = out[..., : v.shape[-1]]
     return out.transpose(1, 2).contiguous()
@@ -232,6 +235,44 @@ def dao_flash_attn_supports_tactile_outer_bias() -> bool:
     return False
 
 
+def block_causal_attention(
+    q_B_S_H_D: torch.Tensor,
+    k_B_S_H_D: torch.Tensor,
+    v_B_S_H_D: torch.Tensor,
+    condition_prefix_tokens: int,
+) -> torch.Tensor:
+    """Two-block self-attention without materializing a dense mask.
+
+    Condition queries attend bidirectionally only within the condition prefix;
+    prediction queries attend bidirectionally to the complete sequence.
+    """
+    sequence_length = q_B_S_H_D.shape[1]
+    if k_B_S_H_D.shape[1] != sequence_length or v_B_S_H_D.shape[1] != sequence_length:
+        raise ValueError("Block-causal self-attention requires equal full Q/K/V sequence lengths")
+    if not 0 < condition_prefix_tokens < sequence_length:
+        raise ValueError(
+            f"condition_prefix_tokens must be in (0, {sequence_length}), got {condition_prefix_tokens}"
+        )
+
+    def _attend(q_part: torch.Tensor, k_part: torch.Tensor, v_part: torch.Tensor) -> torch.Tensor:
+        return F.scaled_dot_product_attention(
+            q_part.transpose(1, 2),
+            k_part.transpose(1, 2),
+            v_part.transpose(1, 2),
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+        ).transpose(1, 2)
+
+    condition = _attend(
+        q_B_S_H_D[:, :condition_prefix_tokens],
+        k_B_S_H_D[:, :condition_prefix_tokens],
+        v_B_S_H_D[:, :condition_prefix_tokens],
+    )
+    prediction = _attend(q_B_S_H_D[:, condition_prefix_tokens:], k_B_S_H_D, v_B_S_H_D)
+    return torch.cat((condition, prediction), dim=1).contiguous()
+
+
 def self_attention_with_tactile_outer_bias_chunked(
     q_B_S_H_D: torch.Tensor,
     k_B_S_H_D: torch.Tensor,
@@ -243,12 +284,14 @@ def self_attention_with_tactile_outer_bias_chunked(
     output_proj: nn.Linear,
     output_dropout: nn.Module,
     gamma_BS: torch.Tensor | None = None,
+    condition_prefix_tokens: int = 0,
 ) -> torch.Tensor:
     """
     Self-attention with additive logits bias: scores_ij += gamma_b * a_i * b_j (batched gamma).
     q,k,v: (B, S, H, D).
 
-    - ``flashbias_sdpa``: one SDPA call, no float mask; ``chunk_q`` ignored.
+    - ``flashbias_sdpa``: one SDPA call (two when block causal), no float mask;
+      ``chunk_q`` ignored.
     - ``sdpa`` / ``eager``: query-axis chunking with ``chunk_q``.
     """
     # Default: FlashBias-style concat (no float attn_mask) so SDPA can use Flash/cuDNN FMHA when supported.
@@ -270,41 +313,59 @@ def self_attention_with_tactile_outer_bias_chunked(
     q_bias = sqrt_gamma * a.view(1, S, 1, 1).expand(B, S, Hn, 1)
     k_bias = key_bias_scale.expand(B, S, Hn, 1)
 
-    if backend == "flashbias_sdpa":
-        out_bshd = _flashbias_sdpa_full(
-            q_B_S_H_D,
+    def _attend(
+        q_part: torch.Tensor,
+        k_part: torch.Tensor,
+        v_part: torch.Tensor,
+        q_bias_part: torch.Tensor,
+        k_bias_part: torch.Tensor,
+    ) -> torch.Tensor:
+        if backend == "flashbias_sdpa":
+            return _flashbias_sdpa_full(
+                q_part,
+                k_part,
+                v_part,
+                q_bias_part,
+                k_bias_part,
+                softmax_scale=D**-0.5,
+                causal=False,
+            )
+
+        q = rearrange(q_part, "b s h d -> b h s d")
+        k = rearrange(k_part, "b s h d -> b h s d")
+        v = rearrange(v_part, "b s h d -> b h s d")
+        qb = rearrange(q_bias_part, "b s h r -> b h s r")
+        kb = rearrange(k_bias_part, "b s h r -> b h r s")
+        out = torch.empty_like(q)
+        for qs in range(0, q.shape[2], chunk_q):
+            qe = min(qs + chunk_q, q.shape[2])
+            q_c = q[:, :, qs:qe, :]
+            attn_bias = qb[:, :, qs:qe, :] * kb
+            if backend == "eager":
+                out[:, :, qs:qe, :] = _chunk_eager(q_c, k, v, attn_bias, D**-0.5)
+            else:
+                out[:, :, qs:qe, :] = _scaled_dot_product_attention_chunk(q_c, k, v, attn_bias, D**-0.5)
+        return rearrange(out, "b h s d -> b s h d")
+
+    if condition_prefix_tokens:
+        if not 0 < condition_prefix_tokens < S:
+            raise ValueError(f"condition_prefix_tokens must be in (0, {S}), got {condition_prefix_tokens}")
+        condition = _attend(
+            q_B_S_H_D[:, :condition_prefix_tokens],
+            k_B_S_H_D[:, :condition_prefix_tokens],
+            v_B_S_H_D[:, :condition_prefix_tokens],
+            q_bias[:, :condition_prefix_tokens],
+            k_bias[:, :condition_prefix_tokens],
+        )
+        prediction = _attend(
+            q_B_S_H_D[:, condition_prefix_tokens:],
             k_B_S_H_D,
             v_B_S_H_D,
-            q_bias,
+            q_bias[:, condition_prefix_tokens:],
             k_bias,
-            softmax_scale=D**-0.5,
-            causal=False,
         )
-        flat = rearrange(out_bshd, "b s h d -> b s (h d)")
-        return output_dropout(output_proj(flat))
-
-    q = rearrange(q_B_S_H_D, "b s h d -> b h s d")
-    k = rearrange(k_B_S_H_D, "b s h d -> b h s d")
-    v = rearrange(v_B_S_H_D, "b s h d -> b h s d")
-    scale = D**-0.5
-    if gamma_BS is None:
-        gamma = gamma_B.to(device=device, dtype=q.dtype).view(B, 1, 1, 1)
-        b_row = b.view(1, 1, 1, S)
+        out_B_S_H_D = torch.cat((condition, prediction), dim=1)
     else:
-        gamma = torch.ones(B, 1, 1, 1, device=device, dtype=q.dtype)
-        b_row = gamma_BS.to(device=device, dtype=q.dtype).view(B, 1, 1, S)
-    out = torch.empty_like(q)
-
-    for qs in range(0, S, chunk_q):
-        qe = min(qs + chunk_q, S)
-        q_c = q[:, :, qs:qe, :]
-        a_c = a[qs:qe].view(1, 1, -1, 1)
-        attn_bias = gamma * (a_c * b_row)
-        if backend == "eager":
-            out[:, :, qs:qe, :] = _chunk_eager(q_c, k, v, attn_bias, scale)
-        else:
-            out[:, :, qs:qe, :] = _scaled_dot_product_attention_chunk(q_c, k, v, attn_bias, scale)
-
-    out_B_S_H_D = rearrange(out, "b h s d -> b s h d")
+        out_B_S_H_D = _attend(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D, q_bias, k_bias)
     flat = rearrange(out_B_S_H_D, "b s h d -> b s (h d)")
     return output_dropout(output_proj(flat))

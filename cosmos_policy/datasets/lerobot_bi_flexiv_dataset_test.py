@@ -7,6 +7,16 @@ from cosmos_policy.datasets.lerobot_bi_flexiv_dataset import (
     LeRobotBiFlexivDataset,
     build_observation_relative_action_chunk,
 )
+from cosmos_policy.utils.bi_flexiv_video_layout import (
+    CONDITION_IMAGE_KEYS,
+    FUTURE_IMAGE_OFFSETS,
+    RGB_IMAGE_KEYS,
+    RGB_HISTORY_OFFSETS,
+    TACTILE_HISTORY_OFFSETS,
+    build_pixel_frame_sequence,
+    clamped_relative_indices,
+)
+from cosmos_policy.utils.tactile_self_attn_gate import scalar_gate_from_raw
 
 
 def test_observation_relative_action_chunk_preserves_absolute_grippers_and_pads() -> None:
@@ -39,6 +49,65 @@ def test_q99_normalization_clips_and_keeps_constant_dimensions() -> None:
         normalized,
         np.array([[-1.0, 1.0, 0.0], [1.0, 1.0, -1.0]], dtype=np.float32),
     )
+
+
+def test_history_and_future_indices_clamp_to_episode_endpoints() -> None:
+    assert clamped_relative_indices(20, RGB_HISTORY_OFFSETS, 100) == (0, 0, 0, 20)
+    assert clamped_relative_indices(2, TACTILE_HISTORY_OFFSETS, 100) == (0, 0, 1, 2)
+    assert clamped_relative_indices(20, TACTILE_HISTORY_OFFSETS, 100) == (17, 18, 19, 20)
+    assert clamped_relative_indices(80, FUTURE_IMAGE_OFFSETS, 100) == (90, 99, 99, 99)
+
+
+def test_tactile_gate_uses_the_two_most_recent_history_frames() -> None:
+    history_frames = {}
+    for key in LeRobotBiFlexivDataset.TACTILE_KEYS:
+        history_frames[key] = np.stack(
+            [np.zeros((2, 2, 3), dtype=np.uint8) for _ in range(3)]
+            + [np.full((2, 2, 3), 255, dtype=np.uint8)]
+        )
+
+    left_gate, right_gate = LeRobotBiFlexivDataset._compute_per_arm_tactile_gate(
+        object.__new__(LeRobotBiFlexivDataset),
+        relative_step_idx=10,
+        history_frames=history_frames,
+    )
+
+    assert left_gate == scalar_gate_from_raw(1.0)
+    assert right_gate == scalar_gate_from_raw(1.0)
+
+
+def test_pixel_sequence_preserves_history_and_future_order() -> None:
+    history = {
+        key: np.stack([np.full((2, 2, 3), base + index, dtype=np.uint8) for index in range(4)])
+        for base, key in zip((10, 20, 30, 40, 50), CONDITION_IMAGE_KEYS, strict=True)
+    }
+    future = {
+        key: np.stack([np.full((2, 2, 3), base + index, dtype=np.uint8) for index in range(4)])
+        for base, key in zip((60, 70, 80), RGB_IMAGE_KEYS, strict=True)
+    }
+
+    frames = build_pixel_frame_sequence(history, future)
+
+    assert frames.shape == (41, 2, 2, 3)
+    np.testing.assert_array_equal(frames[:5], 0)
+    np.testing.assert_array_equal(frames[5:9, 0, 0, 0], [10, 11, 12, 13])
+    np.testing.assert_array_equal(frames[17:21, 0, 0, 0], [40, 41, 42, 43])
+    np.testing.assert_array_equal(frames[25:29], 0)
+    np.testing.assert_array_equal(frames[29:33, 0, 0, 0], [60, 61, 62, 63])
+    np.testing.assert_array_equal(frames[37:41, 0, 0, 0], [80, 81, 82, 83])
+
+
+def test_inference_future_placeholders_repeat_latest_rgb_history() -> None:
+    history = {
+        key: np.stack([np.full((1, 1, 3), base + index, dtype=np.uint8) for index in range(4)])
+        for base, key in zip((10, 20, 30, 40, 50), CONDITION_IMAGE_KEYS, strict=True)
+    }
+
+    frames = build_pixel_frame_sequence(history)
+
+    np.testing.assert_array_equal(frames[29:33, 0, 0, 0], [13, 13, 13, 13])
+    np.testing.assert_array_equal(frames[33:37, 0, 0, 0], [23, 23, 23, 23])
+    np.testing.assert_array_equal(frames[37:41, 0, 0, 0], [33, 33, 33, 33])
 
 
 def test_pyav_decoder_returns_the_exact_requested_frame_after_seek(tmp_path) -> None:

@@ -4,10 +4,10 @@
 """
 LeRobot v3 loader for the dual-arm bi_flexiv platform.
 
-The sequence uses 11 latent slots:
-blank, proprio, 3 current RGB views, 2 merged current tactile views, action,
-and 3 future RGB views. With the WAN2.1 temporal compression factor of 4
-this becomes 41 pixel frames.
+The sequence uses 11 latent slots. Five condition-image slots each contain
+four history frames, and three prediction-image slots each contain four future
+frames. With the WAN2.1 temporal compression factor of 4 this remains 41 pixel
+frames.
 """
 
 from __future__ import annotations
@@ -31,6 +31,27 @@ from tqdm import tqdm
 
 from cosmos_policy.datasets.dataset_common import get_action_chunk_with_padding
 from cosmos_policy.datasets.dataset_utils import preprocess_image
+from cosmos_policy.utils.bi_flexiv_video_layout import (
+    ACTION_CHUNK_SIZE,
+    ACTION_LATENT_IDX as LAYOUT_ACTION_LATENT_IDX,
+    CURRENT_HEAD_IDX as LAYOUT_CURRENT_HEAD_IDX,
+    CURRENT_LEFT_TACTILE_IDX as LAYOUT_CURRENT_LEFT_TACTILE_IDX,
+    CURRENT_LEFT_WRIST_IDX as LAYOUT_CURRENT_LEFT_WRIST_IDX,
+    CURRENT_PROPRIO_IDX as LAYOUT_CURRENT_PROPRIO_IDX,
+    CURRENT_RIGHT_TACTILE_IDX as LAYOUT_CURRENT_RIGHT_TACTILE_IDX,
+    CURRENT_RIGHT_WRIST_IDX as LAYOUT_CURRENT_RIGHT_WRIST_IDX,
+    FUTURE_HEAD_IDX as LAYOUT_FUTURE_HEAD_IDX,
+    FUTURE_IMAGE_OFFSETS,
+    FUTURE_LEFT_WRIST_IDX as LAYOUT_FUTURE_LEFT_WRIST_IDX,
+    FUTURE_RIGHT_WRIST_IDX as LAYOUT_FUTURE_RIGHT_WRIST_IDX,
+    NUM_CONDITIONAL_FRAMES as LAYOUT_NUM_CONDITIONAL_FRAMES,
+    PIXEL_FRAMES as LAYOUT_PIXEL_FRAMES,
+    RGB_HISTORY_OFFSETS,
+    STATE_T as LAYOUT_STATE_T,
+    TACTILE_HISTORY_OFFSETS,
+    build_pixel_frame_sequence,
+    clamped_relative_indices,
+)
 from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
 from cosmos_policy.utils.tactile_self_attn_gate import scalar_gate_from_raw
 
@@ -96,9 +117,9 @@ class _EpisodeRef:
 class LeRobotBiFlexivDataset(Dataset):
     """Direct LeRobot parquet/mp4 dataset for the dual-arm bi_flexiv platform."""
 
-    NUM_LATENT_SLOTS = 11
-    NUM_CONDITIONAL_SLOTS = 7
-    PIXEL_FRAMES = 41
+    NUM_LATENT_SLOTS = LAYOUT_STATE_T
+    NUM_CONDITIONAL_SLOTS = LAYOUT_NUM_CONDITIONAL_FRAMES
+    PIXEL_FRAMES = LAYOUT_PIXEL_FRAMES
 
     VISION_KEYS = (
         "observation.images.head",
@@ -114,22 +135,22 @@ class LeRobotBiFlexivDataset(Dataset):
     VIDEO_KEYS = VISION_KEYS + TACTILE_KEYS
 
     # Latent slot layout.
-    CURRENT_PROPRIO_IDX = 1
-    CURRENT_HEAD_IDX = 2
-    CURRENT_LEFT_WRIST_IDX = 3
-    CURRENT_RIGHT_WRIST_IDX = 4
-    CURRENT_LEFT_TACTILE_IDX = 5
-    CURRENT_RIGHT_TACTILE_IDX = 6
-    ACTION_IDX = 7
-    FUTURE_HEAD_IDX = 8
-    FUTURE_LEFT_WRIST_IDX = 9
-    FUTURE_RIGHT_WRIST_IDX = 10
+    CURRENT_PROPRIO_IDX = LAYOUT_CURRENT_PROPRIO_IDX
+    CURRENT_HEAD_IDX = LAYOUT_CURRENT_HEAD_IDX
+    CURRENT_LEFT_WRIST_IDX = LAYOUT_CURRENT_LEFT_WRIST_IDX
+    CURRENT_RIGHT_WRIST_IDX = LAYOUT_CURRENT_RIGHT_WRIST_IDX
+    CURRENT_LEFT_TACTILE_IDX = LAYOUT_CURRENT_LEFT_TACTILE_IDX
+    CURRENT_RIGHT_TACTILE_IDX = LAYOUT_CURRENT_RIGHT_TACTILE_IDX
+    ACTION_IDX = LAYOUT_ACTION_LATENT_IDX
+    FUTURE_HEAD_IDX = LAYOUT_FUTURE_HEAD_IDX
+    FUTURE_LEFT_WRIST_IDX = LAYOUT_FUTURE_LEFT_WRIST_IDX
+    FUTURE_RIGHT_WRIST_IDX = LAYOUT_FUTURE_RIGHT_WRIST_IDX
 
     def __init__(
         self,
         data_dir: str,
         is_train: bool = True,
-        chunk_size: int = 30,
+        chunk_size: int = ACTION_CHUNK_SIZE,
         final_image_size: int = 224,
         t5_text_embeddings_path: str = "",
         normalize_images: bool = False,
@@ -165,6 +186,8 @@ class LeRobotBiFlexivDataset(Dataset):
         )
         self.data_dir = data_dir
         self.chunk_size = chunk_size
+        if self.chunk_size != ACTION_CHUNK_SIZE:
+            raise ValueError(f"The history layout requires chunk_size={ACTION_CHUNK_SIZE}, got {self.chunk_size}")
         self.final_image_size = final_image_size
         if self.final_image_size != 224:
             raise ValueError(f"The merged-tactile layout requires final_image_size=224, got {self.final_image_size}")
@@ -233,7 +256,13 @@ class LeRobotBiFlexivDataset(Dataset):
         relative_step_idx = int(global_step_idx - self._episode_starts[episode_list_idx])
         episode = self.episodes[episode_list_idx]
         raw_actions, raw_proprio = self._get_episode_arrays(episode)
-        future_frame_idx = min(relative_step_idx + self.chunk_size, episode.length - 1)
+        rgb_history_indices = clamped_relative_indices(relative_step_idx, RGB_HISTORY_OFFSETS, episode.length)
+        tactile_history_indices = clamped_relative_indices(
+            relative_step_idx,
+            TACTILE_HISTORY_OFFSETS,
+            episode.length,
+        )
+        future_indices = clamped_relative_indices(relative_step_idx, FUTURE_IMAGE_OFFSETS, episode.length)
 
         action_chunk = build_observation_relative_action_chunk(
             raw_actions,
@@ -259,45 +288,54 @@ class LeRobotBiFlexivDataset(Dataset):
                 normalization_mode=self.normalization_mode,
             )
 
-        current_frames = {key: self._read_frame(episode, key, relative_step_idx) for key in self.VIDEO_KEYS}
-        future_frames = {key: self._read_frame(episode, key, future_frame_idx) for key in self.VISION_KEYS}
+        history_frames = {
+            **{key: self._read_frames(episode, key, rgb_history_indices) for key in self.VISION_KEYS},
+            **{key: self._read_frames(episode, key, tactile_history_indices) for key in self.TACTILE_KEYS},
+        }
+        future_frames = {key: self._read_frames(episode, key, future_indices) for key in self.VISION_KEYS}
 
-        left_gate, right_gate = self._compute_per_arm_tactile_gate(episode, relative_step_idx, current_frames)
-        left_tactile = merge_tactile_pair_vertical(
-            current_frames["observation.images.left_tactile_0"],
-            current_frames["observation.images.left_tactile_1"],
+        left_gate, right_gate = self._compute_per_arm_tactile_gate(relative_step_idx, history_frames)
+        left_tactile = np.stack(
+            [
+                merge_tactile_pair_vertical(first, second)
+                for first, second in zip(
+                    history_frames["observation.images.left_tactile_0"],
+                    history_frames["observation.images.left_tactile_1"],
+                    strict=True,
+                )
+            ],
+            axis=0,
         )
-        right_tactile = merge_tactile_pair_vertical(
-            current_frames["observation.images.right_tactile_0"],
-            current_frames["observation.images.right_tactile_1"],
+        right_tactile = np.stack(
+            [
+                merge_tactile_pair_vertical(first, second)
+                for first, second in zip(
+                    history_frames["observation.images.right_tactile_0"],
+                    history_frames["observation.images.right_tactile_1"],
+                    strict=True,
+                )
+            ],
+            axis=0,
         )
-
-        blank = np.zeros_like(current_frames["observation.images.head"])
-        unique_frames = [
-            blank,
-            blank,
-            current_frames["observation.images.head"],
-            current_frames["observation.images.left_wrist"],
-            current_frames["observation.images.right_wrist"],
-            left_tactile,
-            right_tactile,
-            blank,
-            future_frames["observation.images.head"],
-            future_frames["observation.images.left_wrist"],
-            future_frames["observation.images.right_wrist"],
-        ]
-        if len(unique_frames) != self.NUM_LATENT_SLOTS:
-            raise RuntimeError(f"Expected {self.NUM_LATENT_SLOTS} latent slots, got {len(unique_frames)}")
-        repeats = [1] + [self.num_duplicates_per_image] * (len(unique_frames) - 1)
-        unique_frames = [self._resize_frame_for_stack(frame) for frame in unique_frames]
+        condition_images = {
+            "head": self._resize_sequence_for_stack(history_frames["observation.images.head"]),
+            "left_wrist": self._resize_sequence_for_stack(history_frames["observation.images.left_wrist"]),
+            "right_wrist": self._resize_sequence_for_stack(history_frames["observation.images.right_wrist"]),
+            "left_tactile_merged": self._resize_sequence_for_stack(left_tactile),
+            "right_tactile_merged": self._resize_sequence_for_stack(right_tactile),
+        }
+        future_images = {
+            key.removeprefix("observation.images."): self._resize_sequence_for_stack(value)
+            for key, value in future_frames.items()
+        }
+        pixel_frames = build_pixel_frame_sequence(condition_images, future_images)
         images = preprocess_image(
-            np.stack(unique_frames, axis=0),
+            pixel_frames,
             final_image_size=self.final_image_size,
             normalize_images=self.normalize_images,
             use_image_aug=self.use_image_aug,
             stronger_image_aug=self.use_stronger_image_aug,
         )
-        images = torch.repeat_interleave(images, torch.as_tensor(repeats, dtype=torch.long), dim=1)
         if images.shape[1] != self.PIXEL_FRAMES:
             raise RuntimeError(f"Expected {self.PIXEL_FRAMES} pixel frames, got {images.shape[1]}")
 
@@ -341,7 +379,7 @@ class LeRobotBiFlexivDataset(Dataset):
         }
 
     def get_inference_sample(self, episode_index: int, relative_step_idx: int) -> dict[str, Any]:
-        """Return one raw online-style observation and its future-frame GT.
+        """Return one raw online-style observation and its four future-frame targets.
 
         ``episode_index`` is the LeRobot episode id from metadata, not its list
         position. Images remain RGB uint8 at their stored resolution; the policy
@@ -357,10 +395,19 @@ class LeRobotBiFlexivDataset(Dataset):
             )
 
         _, raw_proprio = self._get_episode_arrays(episode)
-        future_step_idx = min(relative_step_idx + self.chunk_size, episode.length - 1)
-        current_frames = {key: self._read_frame(episode, key, relative_step_idx) for key in self.VIDEO_KEYS}
-        future_frames = {key: self._read_frame(episode, key, future_step_idx) for key in self.VISION_KEYS}
-        left_gate, right_gate = self._compute_per_arm_tactile_gate(episode, relative_step_idx, current_frames)
+        rgb_history_indices = clamped_relative_indices(relative_step_idx, RGB_HISTORY_OFFSETS, episode.length)
+        tactile_history_indices = clamped_relative_indices(
+            relative_step_idx,
+            TACTILE_HISTORY_OFFSETS,
+            episode.length,
+        )
+        future_indices = clamped_relative_indices(relative_step_idx, FUTURE_IMAGE_OFFSETS, episode.length)
+        history_frames = {
+            **{key: self._read_frames(episode, key, rgb_history_indices) for key in self.VISION_KEYS},
+            **{key: self._read_frames(episode, key, tactile_history_indices) for key in self.TACTILE_KEYS},
+        }
+        future_frames = {key: self._read_frames(episode, key, future_indices) for key in self.VISION_KEYS}
+        left_gate, right_gate = self._compute_per_arm_tactile_gate(relative_step_idx, history_frames)
 
         def _short_names(frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
             return {key.removeprefix("observation.images."): value for key, value in frames.items()}
@@ -369,15 +416,21 @@ class LeRobotBiFlexivDataset(Dataset):
             "observation": {
                 "observation_seq": relative_step_idx,
                 "state": np.ascontiguousarray(raw_proprio[relative_step_idx], dtype=np.float32),
-                "images": _short_names(current_frames),
+                "images": _short_names(history_frames),
                 "tactile_self_attn_gate": np.asarray([left_gate, right_gate], dtype=np.float32),
                 "prompt": episode.command,
             },
             "future_images": _short_names(future_frames),
             "episode_index": episode.episode_index,
             "start_timestep": relative_step_idx,
-            "future_timestep": future_step_idx,
-            "is_padded_future": future_step_idx != relative_step_idx + self.chunk_size,
+            "rgb_history_timesteps": rgb_history_indices,
+            "tactile_history_timesteps": tactile_history_indices,
+            "future_timesteps": future_indices,
+            "future_timestep": future_indices[-1],
+            "is_padded_future": any(
+                actual != relative_step_idx + offset
+                for actual, offset in zip(future_indices, FUTURE_IMAGE_OFFSETS, strict=True)
+            ),
         }
 
     def close(self) -> None:
@@ -511,9 +564,8 @@ class LeRobotBiFlexivDataset(Dataset):
         return {f"actions_{name}": value for name, value in stats.items()}
 
     def _load_or_compute_dataset_statistics(self) -> dict[str, np.ndarray]:
-        stats_path = os.path.join(self.data_dir, "dataset_statistics_lerobot_bi_flexiv.json")
-        legacy_stats_path = os.path.join(self.data_dir, "dataset_statistics_lerobot_earbud.json")
-        stats_load_path = stats_path if os.path.exists(stats_path) else legacy_stats_path
+        stats_path = os.path.join(self.data_dir, "dataset_statistics_lerobot_bi_flexiv_chunk40.json")
+        stats_load_path = stats_path
         if os.path.exists(stats_load_path):
             with open(stats_load_path) as f:
                 raw_stats = json.load(f)
@@ -596,6 +648,9 @@ class LeRobotBiFlexivDataset(Dataset):
         if frame.shape[0] == self.final_image_size and frame.shape[1] == self.final_image_size:
             return frame
         return cv2.resize(frame, (self.final_image_size, self.final_image_size), interpolation=cv2.INTER_AREA)
+
+    def _resize_sequence_for_stack(self, frames: np.ndarray) -> np.ndarray:
+        return np.stack([self._resize_frame_for_stack(frame) for frame in frames], axis=0)
 
     def _video_path(self, ref: _VideoRef) -> str:
         return os.path.join(
@@ -689,19 +744,36 @@ class LeRobotBiFlexivDataset(Dataset):
             time.sleep(0.1 * (attempt + 1))
         raise AssertionError("unreachable")
 
-    def _compute_per_arm_tactile_gate(
+    def _read_frames(
         self,
         episode: _EpisodeRef,
+        video_key: str,
+        relative_step_indices: tuple[int, ...],
+    ) -> np.ndarray:
+        """Read a short frame sequence while decoding repeated endpoint padding once."""
+        unique_frames = {
+            step_idx: self._read_frame(episode, video_key, step_idx)
+            for step_idx in dict.fromkeys(relative_step_indices)
+        }
+        return np.stack([unique_frames[step_idx] for step_idx in relative_step_indices], axis=0)
+
+    def _compute_per_arm_tactile_gate(
+        self,
         relative_step_idx: int,
-        current_frames: dict[str, np.ndarray],
+        history_frames: dict[str, np.ndarray],
     ) -> tuple[float, float]:
         if relative_step_idx == 0:
             return scalar_gate_from_raw(0.0), scalar_gate_from_raw(0.0)
-        prev_idx = relative_step_idx - 1
 
         def _diff(key: str) -> float:
-            prev = self._read_frame(episode, key, prev_idx)
-            curr = current_frames[key]
+            history = history_frames[key]
+            if history.shape[0] != len(TACTILE_HISTORY_OFFSETS):
+                raise ValueError(
+                    f"Tactile history {key!r} must contain {len(TACTILE_HISTORY_OFFSETS)} frames, "
+                    f"got {history.shape}"
+                )
+            prev = history[-2]
+            curr = history[-1]
             return float(np.abs(curr.astype(np.float32) - prev.astype(np.float32)).mean() / 255.0)
 
         left_raw = max(_diff("observation.images.left_tactile_0"), _diff("observation.images.left_tactile_1"))

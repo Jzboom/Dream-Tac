@@ -60,8 +60,17 @@ The active training configuration targets a LeRobot v3-style dual-arm dataset wi
 - task text stored in `meta/tasks.parquet`.
 
 The active model uses 11 latent slots:
-`blank, proprio, 3 current RGB, 2 merged current tactile, action, 3 future RGB`.
-Future proprioception and future tactile prediction are not part of this policy.
+`blank, proprio, 3 RGB histories, 2 merged tactile histories, action, 3 future RGB sequences`.
+Each image slot contains four chronological pixel frames. Condition histories
+use RGB offsets `[-90, -60, -30, 0]` and recent tactile offsets
+`[-3, -2, -1, 0]`; future RGB supervision uses `[+10, +20, +30, +40]`.
+Early/late samples clamp to the first/last episode frame. Future
+proprioception and future tactile prediction are not part of this policy.
+
+Self-attention is block causal: condition slots 0–6 attend bidirectionally only
+within the condition block, while action/future slots 7–10 attend to the full
+sequence and remain jointly denoised. This does not use a cross-request KV
+cache.
 
 The experiment name is:
 
@@ -71,9 +80,10 @@ cosmos_predict2_2b_480p_lerobot_bi_flexiv_wam_11slot
 
 The former `earbud` names remain only as import/config-name aliases. This
 11-slot policy does not support checkpoints trained with the former 18-slot
-layout. New statistics are written as
-`dataset_statistics_lerobot_bi_flexiv.json`; if only the former statistics
-filename exists, the dataset loader reads it automatically.
+layout or the earlier single-frame/30-step 11-slot layout. The 40-step
+statistics are written separately as
+`dataset_statistics_lerobot_bi_flexiv_chunk40.json`, so an older 30-step file is
+never overwritten.
 
 The dataset directory can be changed at launch time with:
 
@@ -188,7 +198,7 @@ your_lerobot_dataset/
 │   ├── tasks.parquet
 │   └── episodes/
 ├── t5_embeddings.pkl
-└── dataset_statistics_lerobot_bi_flexiv.json
+└── dataset_statistics_lerobot_bi_flexiv_chunk40.json
 ```
 
 ### 3.2 Generate T5 task embeddings
@@ -222,20 +232,21 @@ python -c 'from cosmos_policy.datasets.lerobot_bi_flexiv_dataset import LeRobotB
 Output:
 
 ```text
-../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json
+../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv_chunk40.json
 ```
 
 The statistics use the training defaults:
 
 ```text
-chunk_size=30
+chunk_size=40
 gripper_start_idx=18
 normalization_mode=q99
 ```
 
-The action chunk and future RGB target use the same horizon. At the dataset's
-30 Hz sampling rate, the future RGB target is the single frame at `t+30`
-(approximately one second after the current observation).
+At the dataset's 30 Hz sampling rate, every sample contains RGB conditions at
+`t-90`, `t-60`, `t-30`, and `t`, tactile conditions at `t-3`, `t-2`, `t-1`,
+and `t`, action targets `t..t+39`, and RGB targets at `t+10`, `t+20`, `t+30`,
+and `t+40`.
 
 If the statistics file is missing, training can generate it automatically. Pre-generating it avoids every distributed rank computing the same statistics during startup.
 
@@ -244,7 +255,7 @@ If the statistics file is missing, training can generate it automatically. Pre-g
 ```bash
 ls -lh \
   ../pick_up_cube_0713/t5_embeddings.pkl \
-  ../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json \
+  ../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv_chunk40.json \
   ../checkpoints/Cosmos-Predict2-2B-Video2World/model-480p-16fps.pt \
   ../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
 ```
@@ -270,7 +281,7 @@ python -m cosmos_policy.scripts.train \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
-  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
+  job.name=pick_up_cube_rgb_history_recent_tactile_causal_chunk40_v2
 ```
 
 The dry run writes and prints the resolved `config.yaml` path without starting training.
@@ -290,7 +301,7 @@ torchrun \
   lerobot_dataset_path=../pick_up_cube_0713 \
   dataloader_train.batch_size=1 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
-  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
+  job.name=pick_up_cube_rgb_history_recent_tactile_causal_chunk40_v2
 ```
 
 `--standalone` configures rendezvous automatically for single-node distributed training. The number of visible GPUs must equal `--nproc_per_node`.
@@ -330,7 +341,7 @@ The example above writes to:
 ../checkpoints/
 └── cosmos_policy_lerobot_pick_up_cube/
     └── wam_11slot_finetune/
-        └── pick_up_cube_0713_tactile_8gpu_gbs8_v1/
+        └── pick_up_cube_rgb_history_recent_tactile_causal_chunk40_v2/
             └── checkpoints/
 ```
 
@@ -350,11 +361,13 @@ torchrun \
   checkpoint.load_training_state=true \
   trainer.max_iter=120000 \
   job.project=cosmos_policy_lerobot_pick_up_cube \
-  job.name=pick_up_cube_0713_tactile_8gpu_gbs8_v1
+  job.name=pick_up_cube_rgb_history_recent_tactile_causal_chunk40_v2
 ```
 
 `trainer.max_iter` is the final total iteration, not the number of additional iterations.
-Only resume training state from a checkpoint produced by this 11-slot configuration.
+Only resume training state from a checkpoint produced by this sparse-RGB-history,
+recent-tactile, block-causal, 40-step configuration. Start a fresh job from the
+configured Cosmos Predict2 base checkpoint when migrating from an earlier layout.
 
 ### 4.6 CASA attention backend
 
@@ -374,7 +387,7 @@ The trained dual-arm policy can be served through the WebSocket/MsgPack interfac
 ```bash
 export DREAMTAC_CKPT=../checkpoints/path/to/checkpoints/iter_XXXXXXXX
 export DREAMTAC_WAN_VAE=../checkpoints/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth
-export DREAMTAC_STATS=../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv.json
+export DREAMTAC_STATS=../pick_up_cube_0713/dataset_statistics_lerobot_bi_flexiv_chunk40.json
 export DREAMTAC_T5=../pick_up_cube_0713/t5_embeddings.pkl
 export DREAMTAC_DEFAULT_PROMPT='the exact training task text'
 
@@ -387,8 +400,11 @@ python -m cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_server \
 
 Ten denoising steps and diffusion-step residual caching are the defaults. Pass
 `--no-diffusion-step-cache` only for an uncached comparison. Requests contain a
-20D state, three RGB views, four raw tactile views, and a two-value tactile gate.
-Configure the client-side `ActionChunkBroker` with `action_horizon=30` to match
+20D state, four-frame THWC histories for three RGB views and four raw tactile
+views, and a two-value tactile gate. The client supplies RGB at
+`[-90,-60,-30,0]` and tactile at `[-3,-2,-1,0]`; the server is stateless and
+rejects legacy single-frame HWC inputs.
+Configure the client-side `ActionChunkBroker` with `action_horizon=40` to match
 the server response.
 See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
 

@@ -21,6 +21,21 @@ from cosmos_policy.experiments.robot.cosmos_utils import (
     load_dataset_stats,
     unnormalize_actions,
 )
+from cosmos_policy.utils.bi_flexiv_video_layout import (
+    ACTION_CHUNK_SIZE,
+    ACTION_LATENT_IDX,
+    FUTURE_IMAGE_OFFSETS,
+    HISTORY_FRAMES,
+    MERGED_TACTILE_KEYS,
+    NUM_CONDITIONAL_FRAMES,
+    PIXEL_FRAMES,
+    RGB_HISTORY_OFFSETS,
+    RGB_IMAGE_KEYS,
+    STATE_T,
+    TACTILE_HISTORY_OFFSETS,
+    TEMPORAL_COMPRESSION_FACTOR,
+    build_pixel_frame_sequence,
+)
 from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
 
 CAMERA_KEYS = (
@@ -49,14 +64,10 @@ CLIENT_CAMERA_KEYS = (
 _CLIENT_TO_MODEL_CAMERA_KEY = dict(zip(CLIENT_CAMERA_KEYS, CAMERA_KEYS, strict=True))
 
 STATE_DIM = 20
-CHUNK_SIZE = 30
+CHUNK_SIZE = ACTION_CHUNK_SIZE
 ACTION_DIM = 20
 GRIPPER_START_IDX = 18
 IMAGE_SIZE = 224
-STATE_T = 11
-NUM_CONDITIONAL_FRAMES = 7
-ACTION_LATENT_IDX = 7
-PIXEL_FRAMES = 41
 _LATENT_INDICES = {
     "current_proprio_latent_idx": 1,
     "current_image_latent_idx": 2,
@@ -70,16 +81,16 @@ _LATENT_INDICES = {
     "value_latent_idx": -1,
 }
 
-_MERGED_TACTILE_KEYS = ("left_tactile_merged", "right_tactile_merged")
+_MERGED_TACTILE_KEYS = MERGED_TACTILE_KEYS
 _FUTURE_RGB_LATENT_INDICES = dict(
     zip(
-        CAMERA_KEYS[:3],
+        RGB_IMAGE_KEYS,
         (8, 9, 10),
         strict=True,
     )
 )
 _NON_IMAGE_LATENT_INDICES = (0, 1, 7)
-_TEMPORAL_COMPRESSION_FACTOR = 4
+_TEMPORAL_COMPRESSION_FACTOR = TEMPORAL_COMPRESSION_FACTOR
 _ROTATION_6D_SLICES = (
     ("left", slice(3, 9)),
     ("right", slice(12, 18)),
@@ -110,18 +121,20 @@ class DreamTacBiFlexivPolicyConfig:
     diffusion_step_cache: bool = True
 
 
-def _as_hwc_uint8(image: Any, *, name: str, image_size: int | None) -> np.ndarray:
+def _as_thwc_uint8(image: Any, *, name: str, image_size: int | None) -> np.ndarray:
     array = np.asarray(image)
-    if array.ndim != 3:
-        raise ValueError(f"Image {name!r} must have 3 dimensions, got {array.shape}")
-    if array.shape[0] == 3 and array.shape[-1] != 3:
-        array = np.transpose(array, (1, 2, 0))
-    if array.shape[-1] != 3:
-        raise ValueError(f"Image {name!r} must be HWC or CHW RGB, got {array.shape}")
+    if array.ndim != 4 or array.shape[0] != HISTORY_FRAMES or array.shape[-1] != 3:
+        raise ValueError(
+            f"Image history {name!r} must be THWC RGB with shape ({HISTORY_FRAMES}, H, W, 3), "
+            f"got {array.shape}"
+        )
     if array.dtype != np.uint8:
-        raise ValueError(f"Image {name!r} must have dtype uint8, got {array.dtype}")
-    if image_size is not None and array.shape[:2] != (image_size, image_size):
-        array = cv2.resize(array, (image_size, image_size), interpolation=cv2.INTER_AREA)
+        raise ValueError(f"Image history {name!r} must have dtype uint8, got {array.dtype}")
+    if image_size is not None and array.shape[1:3] != (image_size, image_size):
+        array = np.stack(
+            [cv2.resize(frame, (image_size, image_size), interpolation=cv2.INTER_AREA) for frame in array],
+            axis=0,
+        )
     return np.ascontiguousarray(array)
 
 
@@ -133,11 +146,11 @@ def prepare_rgb_images(
     jpeg_quality: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Apply the model's deterministic preprocessing to the three RGB views."""
-    missing = [name for name in CAMERA_KEYS[:3] if name not in raw_images]
+    missing = [name for name in RGB_IMAGE_KEYS if name not in raw_images]
     if missing:
         raise ValueError(f"RGB observation is missing cameras: {missing}")
-    image_stack = np.stack(
-        [_as_hwc_uint8(raw_images[name], name=name, image_size=image_size) for name in CAMERA_KEYS[:3]],
+    image_stack = np.concatenate(
+        [_as_thwc_uint8(raw_images[name], name=name, image_size=image_size) for name in RGB_IMAGE_KEYS],
         axis=0,
     )
     if jpeg_quality is not None:
@@ -146,7 +159,8 @@ def prepare_rgb_images(
         image_stack = apply_jpeg_compression_np(image_stack, quality=jpeg_quality)
     if center_crop:
         image_stack = apply_image_transforms(image_stack)
-    return {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(CAMERA_KEYS[:3])}
+    image_stack = image_stack.reshape(len(RGB_IMAGE_KEYS), HISTORY_FRAMES, image_size, image_size, 3)
+    return {name: np.ascontiguousarray(image_stack[index]) for index, name in enumerate(RGB_IMAGE_KEYS)}
 
 
 def prepare_camera_images(
@@ -184,7 +198,7 @@ def prepare_camera_images(
     resolved_images = {}
     for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items():
         source_name = client_name if client_name in raw_images else model_name
-        resolved_images[model_name] = _as_hwc_uint8(
+        resolved_images[model_name] = _as_thwc_uint8(
             raw_images[source_name],
             name=source_name,
             image_size=None if "tactile" in model_name else image_size,
@@ -199,17 +213,20 @@ def prepare_camera_images(
 
     merged_stack = np.stack(
         [
-            merge_tactile_pair_vertical(
-                resolved_images["left_tactile_0"],
-                resolved_images["left_tactile_1"],
-            ),
-            merge_tactile_pair_vertical(
-                resolved_images["right_tactile_0"],
-                resolved_images["right_tactile_1"],
-            ),
+            [
+                merge_tactile_pair_vertical(first, second)
+                for first, second in zip(
+                    resolved_images[f"{arm}_tactile_0"],
+                    resolved_images[f"{arm}_tactile_1"],
+                    strict=True,
+                )
+            ]
+            for arm in ("left", "right")
         ],
         axis=0,
     )
+    merged_shape = merged_stack.shape
+    merged_stack = merged_stack.reshape(-1, *merged_shape[2:])
     if jpeg_quality is not None:
         merged_stack = apply_jpeg_compression_np(merged_stack, quality=jpeg_quality)
     if center_crop:
@@ -218,6 +235,7 @@ def prepare_camera_images(
         # counterpart for both modalities; otherwise tactile sees a different
         # spatial distribution between training and deployment.
         merged_stack = apply_image_transforms(merged_stack)
+    merged_stack = merged_stack.reshape(merged_shape)
     images.update(
         {name: np.ascontiguousarray(merged_stack[index]) for index, name in enumerate(_MERGED_TACTILE_KEYS)}
     )
@@ -274,7 +292,7 @@ def decode_future_images(
     non_image_latent_indices: Sequence[int] = _NON_IMAGE_LATENT_INDICES,
     temporal_compression_factor: int = _TEMPORAL_COMPRESSION_FACTOR,
 ) -> dict[str, np.ndarray]:
-    """Decode the three predicted future RGB slots into RGB uint8 images.
+    """Decode all four frames in each predicted future RGB slot.
 
     Proprio/action values are injected after VAE encoding. Their latent slots must
     therefore be restored from the clean pre-injection latent before decoding, or
@@ -299,33 +317,20 @@ def decode_future_images(
 
     result: dict[str, np.ndarray] = {}
     for camera_name, latent_index in _FUTURE_RGB_LATENT_INDICES.items():
-        raw_index = (latent_index - 1) * temporal_compression_factor + 1
-        if not 0 <= raw_index < decoded.shape[1]:
+        raw_start = (latent_index - 1) * temporal_compression_factor + 1
+        raw_stop = raw_start + temporal_compression_factor
+        if not 0 <= raw_start < raw_stop <= decoded.shape[1]:
             raise IndexError(
-                f"Decoded frame index {raw_index} for {camera_name!r} is outside T={decoded.shape[1]}"
+                f"Decoded frame range [{raw_start}, {raw_stop}) for {camera_name!r} is outside "
+                f"T={decoded.shape[1]}"
             )
-        result[camera_name] = np.ascontiguousarray(decoded[0, raw_index])
+        result[camera_name] = np.ascontiguousarray(decoded[0, raw_start:raw_stop])
     return result
 
 
 def build_pixel_video(images: Mapping[str, np.ndarray]) -> np.ndarray:
     """Build the 41-frame uint8 video tensor used by the 11-slot WAN VAE."""
-    blank = np.zeros_like(images["head"])
-    unique_frames = [
-        blank,
-        blank,
-        images["head"],
-        images["left_wrist"],
-        images["right_wrist"],
-        images["left_tactile_merged"],
-        images["right_tactile_merged"],
-        blank,
-        images["head"],
-        images["left_wrist"],
-        images["right_wrist"],
-    ]
-    repeats = np.asarray([1] + [4] * 10, dtype=np.int64)
-    video_thwc = np.repeat(np.stack(unique_frames, axis=0), repeats, axis=0)
+    video_thwc = build_pixel_frame_sequence(images)
     if video_thwc.shape != (PIXEL_FRAMES, IMAGE_SIZE, IMAGE_SIZE, 3):
         raise ValueError(f"Unexpected pixel video shape: {video_thwc.shape}")
     return np.ascontiguousarray(np.transpose(video_thwc, (3, 0, 1, 2))[None])
@@ -536,7 +541,18 @@ class DreamTacBiFlexivPolicy:
             "camera_keys": CLIENT_CAMERA_KEYS,
             "legacy_camera_keys": CAMERA_KEYS,
             "condition_image_keys": CAMERA_KEYS[:3] + _MERGED_TACTILE_KEYS,
-            "image_shape": (self.config.image_size, self.config.image_size, 3),
+            "image_shape": (HISTORY_FRAMES, self.config.image_size, self.config.image_size, 3),
+            "camera_history_shape": (HISTORY_FRAMES, self.config.image_size, self.config.image_size, 3),
+            "future_image_shape": (
+                len(FUTURE_IMAGE_OFFSETS),
+                self.config.image_size,
+                self.config.image_size,
+                3,
+            ),
+            "history_frames": HISTORY_FRAMES,
+            "rgb_history_offsets": RGB_HISTORY_OFFSETS,
+            "tactile_history_offsets": TACTILE_HISTORY_OFFSETS,
+            "future_image_offsets": FUTURE_IMAGE_OFFSETS,
             "future_images_decoded": self.config.decode_future_images,
             "state_t": STATE_T,
             "num_conditional_frames": NUM_CONDITIONAL_FRAMES,
@@ -594,6 +610,13 @@ class DreamTacBiFlexivPolicy:
         pixel_frames = int(self.model.tokenizer.get_pixel_num_frames(state_t))
         if pixel_frames != PIXEL_FRAMES:
             raise ValueError(f"Tokenizer expects {pixel_frames} pixel frames, expected {PIXEL_FRAMES}")
+        model_net = getattr(self.model, "net", None)
+        block_causal_frames = getattr(model_net, "block_causal_condition_frames", None)
+        if block_causal_frames is not None and int(block_causal_frames) != NUM_CONDITIONAL_FRAMES:
+            raise ValueError(
+                "Checkpoint/config has the wrong block-causal condition prefix: "
+                f"{block_causal_frames} != {NUM_CONDITIONAL_FRAMES}"
+            )
 
     def _get_text_embedding(self, prompt: str) -> torch.Tensor:
         if prompt in self.text_embeddings:
@@ -778,7 +801,9 @@ class DreamTacBiFlexivPolicy:
         observation = {
             "state": midpoint,
             "images": {
-                name: np.zeros((self.config.image_size, self.config.image_size, 3), dtype=np.uint8)
+                name: np.zeros(
+                    (HISTORY_FRAMES, self.config.image_size, self.config.image_size, 3), dtype=np.uint8
+                )
                 for name in CAMERA_KEYS
             },
             "tactile_self_attn_gate": np.asarray([0.15, 0.15], dtype=np.float32),

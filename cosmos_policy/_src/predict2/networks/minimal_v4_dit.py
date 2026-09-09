@@ -22,6 +22,7 @@ from enum import Enum
 from typing import List, Optional, Sequence, Tuple, Union
 
 from cosmos_policy._src.predict2.networks.tactile_self_attn_chunked import (
+    block_causal_attention,
     self_attention_with_tactile_outer_bias_chunked,
 )
 from cosmos_policy._src.predict2.utils.kv_cache import AttentionOpWithKVCache, KVCacheConfig
@@ -595,6 +596,7 @@ class Attention(nn.Module):
         tactile_gamma_B: Optional[torch.Tensor] = None,
         tactile_gamma_BS: Optional[torch.Tensor] = None,
         tactile_attn_chunk_q: int = 32,
+        block_causal_prefix_tokens: int = 0,
     ):
         """
         Args:
@@ -604,6 +606,11 @@ class Attention(nn.Module):
             video_size(VideoSize): Shape [T, H, W]
         """
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
+        if block_causal_prefix_tokens:
+            if not self.is_selfattn:
+                raise ValueError("Block-causal attention is supported only for self-attention")
+            if kv_cache_cfg is not None:
+                raise ValueError("Block-causal attention does not support KV cache")
         if (
             self.is_selfattn
             and tactile_outer_a_S is not None
@@ -621,7 +628,12 @@ class Attention(nn.Module):
                 self.output_proj,
                 self.output_dropout,
                 gamma_BS=tactile_gamma_BS,
+                condition_prefix_tokens=block_causal_prefix_tokens,
             )
+        if block_causal_prefix_tokens:
+            result = block_causal_attention(q, k, v, block_causal_prefix_tokens)
+            result = rearrange(result, "b s h d -> b s (h d)")
+            return self.output_dropout(self.output_proj(result))
         return self.compute_attention(q, k, v, video_size=video_size, kv_cache_cfg=kv_cache_cfg)
 
     def set_context_parallel_group(self, process_group, ranks, stream, cp_comm_type: str = "p2p"):
@@ -1212,9 +1224,15 @@ class Block(nn.Module):
         backend: str = "transformer_engine",
         image_context_dim: Optional[int] = None,
         use_wan_fp32_strategy: bool = False,
+        block_causal_condition_frames: int = 0,
     ):
         super().__init__()
         self.x_dim = x_dim
+        if block_causal_condition_frames < 0:
+            raise ValueError(
+                f"block_causal_condition_frames must be non-negative, got {block_causal_condition_frames}"
+            )
+        self.block_causal_condition_frames = block_causal_condition_frames
         self.layer_norm_self_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
         self.self_attn = Attention(
             x_dim,
@@ -1356,6 +1374,16 @@ class Block(nn.Module):
         gate_mlp_B_T_1_1_D = rearrange(gate_mlp_B_T_D, "b t d -> b t 1 1 d").type_as(x_B_T_H_W_D)
 
         B, T, H, W, D = x_B_T_H_W_D.shape
+        block_causal_prefix_tokens = 0
+        if self.block_causal_condition_frames:
+            if self.cp_size is not None and self.cp_size > 1:
+                raise ValueError("block_causal_condition_frames requires context_parallel_size=1")
+            if self.block_causal_condition_frames >= T:
+                raise ValueError(
+                    "block_causal_condition_frames must be smaller than the latent sequence length: "
+                    f"{self.block_causal_condition_frames} >= {T}"
+                )
+            block_causal_prefix_tokens = self.block_causal_condition_frames * H * W
 
         def _fn(_x_B_T_H_W_D, _norm_layer, _scale_B_T_1_1_D, _shift_B_T_1_1_D):
             return _norm_layer(_x_B_T_H_W_D) * (1 + _scale_B_T_1_1_D) + _shift_B_T_1_1_D
@@ -1391,6 +1419,7 @@ class Block(nn.Module):
                 tactile_gamma_B=tactile_gamma_B,
                 tactile_gamma_BS=tactile_gamma_BS,
                 tactile_attn_chunk_q=tactile_attn_chunk_q,
+                block_causal_prefix_tokens=block_causal_prefix_tokens,
             ),
             "b (t h w) d -> b t h w d",
             t=T,
@@ -1552,6 +1581,7 @@ class MiniTrainDIT(WeightTrainingStat):
         tactile_latent_t_indices: Tuple[int, ...] = (4, 5, 10, 11),
         tactile_latent_gate_groups: Tuple[int, ...] = (),
         tactile_attn_chunk_q: int = 32,
+        block_causal_condition_frames: int = 0,
     ) -> None:
         super().__init__()
         self.max_img_h = max_img_h
@@ -1597,6 +1627,11 @@ class MiniTrainDIT(WeightTrainingStat):
         self.tactile_latent_t_indices = tuple(tactile_latent_t_indices)
         self.tactile_latent_gate_groups = tuple(tactile_latent_gate_groups)
         self.tactile_attn_chunk_q = tactile_attn_chunk_q
+        if block_causal_condition_frames < 0:
+            raise ValueError(
+                f"block_causal_condition_frames must be non-negative, got {block_causal_condition_frames}"
+            )
+        self.block_causal_condition_frames = block_causal_condition_frames
 
         self.blocks = nn.ModuleList(
             [
@@ -1610,6 +1645,7 @@ class MiniTrainDIT(WeightTrainingStat):
                     backend=atten_backend,
                     image_context_dim=None if extra_image_context_dim is None else model_channels,
                     use_wan_fp32_strategy=use_wan_fp32_strategy,
+                    block_causal_condition_frames=block_causal_condition_frames,
                 )
                 for _ in range(num_blocks)
             ]
