@@ -53,7 +53,8 @@ def test_q99_normalization_clips_and_keeps_constant_dimensions() -> None:
 
 
 def test_history_and_future_indices_clamp_to_episode_endpoints() -> None:
-    assert clamped_relative_indices(20, RGB_HISTORY_OFFSETS, 100) == (0, 0, 0, 20)
+    assert clamped_relative_indices(2, RGB_HISTORY_OFFSETS, 100) == (0, 0, 1, 2)
+    assert clamped_relative_indices(20, RGB_HISTORY_OFFSETS, 100) == (17, 18, 19, 20)
     assert clamped_relative_indices(2, TACTILE_HISTORY_OFFSETS, 100) == (0, 0, 1, 2)
     assert clamped_relative_indices(20, TACTILE_HISTORY_OFFSETS, 100) == (17, 18, 19, 20)
     assert clamped_relative_indices(80, FUTURE_IMAGE_OFFSETS, 100) == (90, 99, 99, 99)

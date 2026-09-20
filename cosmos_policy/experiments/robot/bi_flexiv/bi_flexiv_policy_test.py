@@ -68,14 +68,14 @@ def test_default_policy_contract_is_11_slot_10_step_cached() -> None:
     assert PIXEL_FRAMES == 41
     assert CHUNK_SIZE == 40
     assert HISTORY_FRAMES == 4
-    assert RGB_HISTORY_OFFSETS == (-90, -60, -30, 0)
+    assert RGB_HISTORY_OFFSETS == (-3, -2, -1, 0)
     assert TACTILE_HISTORY_OFFSETS == (-3, -2, -1, 0)
     assert FUTURE_IMAGE_OFFSETS == (10, 20, 30, 40)
     assert config.num_denoising_steps == 10
     assert config.diffusion_step_cache is True
 
 
-def test_policy_metadata_exposes_distinct_rgb_and_tactile_history_offsets() -> None:
+def test_policy_metadata_exposes_rgb_and_tactile_history_offsets() -> None:
     policy = object.__new__(DreamTacBiFlexivPolicy)
     policy.config = DreamTacBiFlexivPolicyConfig("ckpt", "stats", "t5", "prompt")
 
@@ -84,7 +84,7 @@ def test_policy_metadata_exposes_distinct_rgb_and_tactile_history_offsets() -> N
     assert "history_offsets" not in metadata
     assert metadata["camera_keys"] == PREPROCESSED_CAMERA_KEYS
     assert metadata["raw_camera_keys"] == CLIENT_CAMERA_KEYS
-    assert metadata["rgb_history_offsets"] == (-90, -60, -30, 0)
+    assert metadata["rgb_history_offsets"] == (-3, -2, -1, 0)
     assert metadata["tactile_history_offsets"] == (-3, -2, -1, 0)
 
 
