@@ -12,6 +12,7 @@ from cosmos_policy.experiments.robot.bi_flexiv.bi_flexiv_policy import (
     CHUNK_SIZE,
     NUM_CONDITIONAL_FRAMES,
     PIXEL_FRAMES,
+    PREPROCESSED_CAMERA_KEYS,
     STATE_T,
     DreamTacBiFlexivPolicy,
     DreamTacBiFlexivPolicyConfig,
@@ -81,6 +82,8 @@ def test_policy_metadata_exposes_distinct_rgb_and_tactile_history_offsets() -> N
     metadata = policy.metadata
 
     assert "history_offsets" not in metadata
+    assert metadata["camera_keys"] == PREPROCESSED_CAMERA_KEYS
+    assert metadata["raw_camera_keys"] == CLIENT_CAMERA_KEYS
     assert metadata["rgb_history_offsets"] == (-90, -60, -30, 0)
     assert metadata["tactile_history_offsets"] == (-3, -2, -1, 0)
 
@@ -111,6 +114,18 @@ def test_prepare_camera_images_center_crops_merged_tactile_like_training() -> No
 
     np.testing.assert_array_equal(cropped["left_tactile_merged"], expected[0])
     np.testing.assert_array_equal(cropped["right_tactile_merged"], expected[1])
+
+
+def test_prepare_camera_images_accepts_compact_preprocessed_transport() -> None:
+    compact = prepare_camera_images(_raw_images(), center_crop=False)
+
+    received = prepare_camera_images(compact, center_crop=True)
+    expected = prepare_camera_images(_raw_images(), center_crop=True)
+
+    assert tuple(compact) == PREPROCESSED_CAMERA_KEYS
+    assert all(image.shape == (4, 224, 224, 3) for image in compact.values())
+    for name in PREPROCESSED_CAMERA_KEYS:
+        np.testing.assert_array_equal(received[name], expected[name])
 
 
 def test_build_pixel_video_uses_history_in_the_fixed_11_slot_layout() -> None:

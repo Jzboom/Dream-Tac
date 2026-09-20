@@ -82,6 +82,7 @@ _LATENT_INDICES = {
 }
 
 _MERGED_TACTILE_KEYS = MERGED_TACTILE_KEYS
+PREPROCESSED_CAMERA_KEYS = RGB_IMAGE_KEYS + _MERGED_TACTILE_KEYS
 _FUTURE_RGB_LATENT_INDICES = dict(
     zip(
         RGB_IMAGE_KEYS,
@@ -172,12 +173,58 @@ def prepare_camera_images(
 ) -> dict[str, np.ndarray]:
     """Prepare three RGB views and two merged tactile condition views.
 
-    Robot-facing tactile names (for example ``left_tactile_left``) are mapped
-    to the numeric names used by the training dataset.  The legacy numeric
-    names remain accepted for offline evaluation and older clients.
+    The preferred network contract contains five already resized condition
+    views, including one merged tactile view per gripper. Raw seven-camera
+    observations remain accepted for offline evaluation and older clients.
     """
     if image_size != IMAGE_SIZE:
         raise ValueError(f"The merged-tactile policy requires image_size={IMAGE_SIZE}, got {image_size}")
+
+    merged_tactile_present = [name for name in _MERGED_TACTILE_KEYS if name in raw_images]
+    if merged_tactile_present:
+        missing = [name for name in PREPROCESSED_CAMERA_KEYS if name not in raw_images]
+        if missing:
+            raise ValueError(f"Preprocessed observation is missing condition cameras: {missing}")
+        raw_tactile_present = [
+            name
+            for name in CLIENT_CAMERA_KEYS[3:] + CAMERA_KEYS[3:]
+            if name in raw_images
+        ]
+        if raw_tactile_present:
+            raise ValueError(
+                "Preprocessed observation must not also contain raw tactile cameras: "
+                f"{raw_tactile_present}"
+            )
+
+        images = prepare_rgb_images(
+            raw_images,
+            image_size=image_size,
+            center_crop=center_crop,
+            jpeg_quality=jpeg_quality,
+        )
+        merged_stack = np.concatenate(
+            [
+                _as_thwc_uint8(raw_images[name], name=name, image_size=image_size)
+                for name in _MERGED_TACTILE_KEYS
+            ],
+            axis=0,
+        )
+        if jpeg_quality is not None:
+            merged_stack = apply_jpeg_compression_np(merged_stack, quality=jpeg_quality)
+        if center_crop:
+            merged_stack = apply_image_transforms(merged_stack)
+        merged_stack = merged_stack.reshape(
+            len(_MERGED_TACTILE_KEYS),
+            HISTORY_FRAMES,
+            image_size,
+            image_size,
+            3,
+        )
+        images.update(
+            {name: np.ascontiguousarray(merged_stack[index]) for index, name in enumerate(_MERGED_TACTILE_KEYS)}
+        )
+        return images
+
     duplicate_aliases = [
         (client_name, model_name)
         for client_name, model_name in _CLIENT_TO_MODEL_CAMERA_KEY.items()
@@ -538,9 +585,10 @@ class DreamTacBiFlexivPolicy:
             "action_horizon": CHUNK_SIZE,
             "action_space": action_space,
             "normalization_mode": self.config.normalization_mode,
-            "camera_keys": CLIENT_CAMERA_KEYS,
+            "camera_keys": PREPROCESSED_CAMERA_KEYS,
+            "raw_camera_keys": CLIENT_CAMERA_KEYS,
             "legacy_camera_keys": CAMERA_KEYS,
-            "condition_image_keys": CAMERA_KEYS[:3] + _MERGED_TACTILE_KEYS,
+            "condition_image_keys": PREPROCESSED_CAMERA_KEYS,
             "image_shape": (HISTORY_FRAMES, self.config.image_size, self.config.image_size, 3),
             "camera_history_shape": (HISTORY_FRAMES, self.config.image_size, self.config.image_size, 3),
             "future_image_shape": (
