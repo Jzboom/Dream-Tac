@@ -59,6 +59,8 @@ The response contains a `(40, 20)` action chunk and timing information. When
 future decoding is enabled, each of the three RGB outputs has shape
 `(4,H,W,3)` in `[+10,+20,+30,+40]` order. The client-side `ActionChunkBroker`
 must use `action_horizon=40`.
+For asynchronous RTC, use the Xense-compatible adapter with an initial prefix
+of 14 at 30 actions/s. See [RTC setup, latency measurements, and tests](RTC.md).
 
 ## Start server
 

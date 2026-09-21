@@ -407,6 +407,10 @@ rejects legacy single-frame HWC inputs.
 Configure the client-side `ActionChunkBroker` with `action_horizon=40` to match
 the server response.
 See `cosmos_policy/experiments/robot/bi_flexiv/README.md` for the full protocol.
+RTC asynchronous execution is supported through the Xense-compatible adapter;
+at 30 actions/s, the measured starting prefix is 14 for a 40-action chunk.
+See [RTC configuration and measured latency](cosmos_policy/experiments/robot/bi_flexiv/RTC.md)
+for the client setup, protocol, and inference-only tests.
 
 ---
 

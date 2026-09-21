@@ -37,6 +37,7 @@ from cosmos_policy.utils.bi_flexiv_video_layout import (
     build_pixel_frame_sequence,
 )
 from cosmos_policy.utils.tactile_image import merge_tactile_pair_vertical
+from cosmos_policy.modules.rtc import validate_prefix
 
 CAMERA_KEYS = (
     "head",
@@ -607,7 +608,9 @@ class DreamTacBiFlexivPolicy:
             "action_latent_idx": ACTION_LATENT_IDX,
             "diffusion_step_cache": self.config.diffusion_step_cache,
             "future_image_horizon": CHUNK_SIZE,
-            "rtc_supported": False,
+            "rtc_supported": self.config.action_output == "absolute_from_state",
+            "rtc_method": "edm_prefix_inpainting",
+            "rtc_prefix_action_space": "absolute_tcp18_absolute_gripper2",
         }
 
     def _get_model_device(self) -> torch.device:
@@ -717,11 +720,24 @@ class DreamTacBiFlexivPolicy:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
-    def infer(self, observation: Mapping[str, Any], **kwargs: Any) -> dict[str, Any]:
+    def infer(
+        self, observation: Mapping[str, Any], *, prev_chunk_left_over=None,
+        inference_delay=None, execution_horizon=None, **kwargs: Any,
+    ) -> dict[str, Any]:
         if kwargs:
-            raise NotImplementedError(
-                "Dream-Tac does not support OpenPI RTC kwargs. Disable --rtc-enabled on the robot client."
-            )
+            raise TypeError(f"Unknown inference kwargs: {sorted(kwargs)}")
+        # execution_horizon is a client scheduling parameter in Xense's broker.
+        if execution_horizon is not None and (
+            isinstance(execution_horizon, (bool, np.bool_))
+            or not isinstance(execution_horizon, (int, np.integer))
+            or not 1 <= execution_horizon <= CHUNK_SIZE
+        ):
+            raise ValueError(f"execution_horizon must be an integer in [1, {CHUNK_SIZE}]")
+        prefix, prefix_length = validate_prefix(
+            prev_chunk_left_over, inference_delay, horizon=CHUNK_SIZE, action_dim=ACTION_DIM,
+        )
+        if prefix_length and self.config.action_output != "absolute_from_state":
+            raise ValueError("RTC requires action_output='absolute_from_state' to rebase queued actions")
 
         infer_start = time.perf_counter()
         preprocess_start = time.perf_counter()
@@ -746,6 +762,22 @@ class DreamTacBiFlexivPolicy:
             tactile_gate=tactile_gate,
             prompt=prompt,
         )
+        relative_prefix = None
+        if prefix_length:
+            relative_prefix = prefix.copy()
+            relative_prefix[:, :GRIPPER_START_IDX] -= state[None, :GRIPPER_START_IDX]
+            low, high = _normalization_bounds(self.dataset_stats, "actions", self.config.normalization_mode)
+            span = high - low
+            # Invert the output normalization without clipping old commands.
+            # Constant dimensions cannot encode a changed target; preserve them
+            # exactly at the output boundary while conditioning at their mean.
+            normalized_prefix = np.zeros_like(relative_prefix)
+            valid = span >= 1e-6
+            normalized_prefix[:, valid] = 2 * (relative_prefix[:, valid] - low[valid]) / span[valid] - 1
+            normalized_chunk = np.zeros((1, CHUNK_SIZE, ACTION_DIM), dtype=np.float32)
+            normalized_chunk[0, :prefix_length] = normalized_prefix
+            data_batch["rtc_actions"] = torch.from_numpy(normalized_chunk).to(self.device)
+            data_batch["rtc_prefix_length"] = prefix_length
         # Tensor transfers in _build_data_batch may be asynchronous.  Synchronize
         # here so their cost is attributed to preprocessing instead of vanishing
         # between the preprocessing and sampling timers.
@@ -795,9 +827,15 @@ class DreamTacBiFlexivPolicy:
         )[0].astype(np.float32)
         if observation_relative.shape != (CHUNK_SIZE, ACTION_DIM) or not np.isfinite(observation_relative).all():
             raise ValueError(f"Invalid Dream-Tac action output: shape={observation_relative.shape}")
+        if prefix_length:
+            observation_relative[:prefix_length] = relative_prefix
 
         if self.config.action_output == "absolute_from_state":
             actions = observation_relative_to_absolute(observation_relative, state)
+            if prefix_length:
+                # Avoid roundoff, quantile clipping and a second SO(3)
+                # projection changing commands already queued by the robot.
+                actions[:prefix_length] = prefix
             action_space = "absolute_tcp18_absolute_gripper2"
         else:
             actions = observation_relative
@@ -834,6 +872,7 @@ class DreamTacBiFlexivPolicy:
             "action_space": action_space,
             "server_timing": timing,
             "normalized_action_clipped_fraction": clipped_fraction,
+            "rtc_prefix_length": prefix_length,
         }
         if self.config.action_output == "absolute_from_state":
             response["observation_relative_actions"] = observation_relative

@@ -890,6 +890,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
 
         # NOTE: FlowUniPC scheduler support (inherited from base, keeping for compatibility)
         if self.config.use_flowunipc_scheduler:
+            if "rtc_actions" in data_batch:
+                raise ValueError("RTC inpainting requires the EDM sampler, not FlowUniPC")
             # Use parent implementation for FlowUniPC
             return super().generate_samples_from_batch(
                 data_batch,
@@ -917,6 +919,21 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                 * sigma_max_variance_scale
             )
 
+        rtc_constraint = None
+        if "rtc_actions" in data_batch:
+            from cosmos_policy.modules.rtc import ActionPrefixInpainting
+
+            if self.net.is_context_parallel_enabled:
+                raise ValueError("RTC currently requires single-device inference")
+            rtc_constraint = ActionPrefixInpainting(
+                x_sigma_max,
+                data_batch["rtc_actions"],
+                data_batch["action_latent_idx"],
+                data_batch["rtc_prefix_length"],
+                (sigma_max if sigma_max is not None else self.sde.sigma_max) * sigma_max_variance_scale,
+            )
+            x0_fn = rtc_constraint.wrap(x0_fn)
+
         if self.net.is_context_parallel_enabled:
             x_sigma_max = broadcast_split_tensor(
                 x_sigma_max, seq_dim=2, process_group=self.get_context_parallel_group()
@@ -932,6 +949,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             sigma_min=self.sde.sigma_min * sigma_min_variance_scale,
             solver_option=solver_option,
         )
+        if rtc_constraint is not None:
+            samples = rtc_constraint.finish(samples)
         if self.net.is_context_parallel_enabled:
             samples = cat_outputs_cp(samples, seq_dim=2, cp_group=self.get_context_parallel_group())
 
