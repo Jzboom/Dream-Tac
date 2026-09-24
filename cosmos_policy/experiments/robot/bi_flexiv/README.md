@@ -6,7 +6,7 @@ This server loads checkpoints trained with the fixed layout below.
 |---:|---|---|
 | 0 | blank | condition |
 | 1 | current proprioception | condition |
-| 2–4 | head, left-wrist, right-wrist RGB histories at `[-90,-60,-30,0]` | condition |
+| 2–4 | head, left-wrist, right-wrist RGB histories at `[-3,-2,-1,0]` | condition |
 | 5–6 | merged left/right tactile histories at `[-3,-2,-1,0]` | condition |
 | 7 | action chunk | prediction |
 | 8–10 | future RGB sequences at `[+10,+20,+30,+40]` | prediction |
@@ -49,7 +49,7 @@ Training and inference call the same preprocessing function.
 }
 ```
 
-The RGB frames must be in chronological `[-90,-60,-30,0]` order, while every
+The RGB frames must be in chronological `[-3,-2,-1,0]` order, while every
 tactile camera must use the recent chronological `[-3,-2,-1,0]` order. Legacy
 numeric tactile keys (`left_tactile_0`, etc.) are also accepted, but legacy HWC
 single frames are rejected. `tactile_self_attn_gate` keeps its instantaneous

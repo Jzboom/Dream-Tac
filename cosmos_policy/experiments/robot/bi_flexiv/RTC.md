@@ -97,10 +97,12 @@ response = policy.infer(
 在装有参考版本 `xense-client` / `lerobot` 的机器人 Python 环境中使用：
 
 ```python
-from xense_client.websocket_client_policy import WebsocketClientPolicy
-from cosmos_policy.experiments.robot.bi_flexiv.rtc_client import DreamTacRTCActionChunkBroker
+from cosmos_policy.experiments.robot.bi_flexiv.rtc_client import (
+    DreamTacRTCActionChunkBroker,
+    DreamTacWebsocketClientPolicy,
+)
 
-remote = WebsocketClientPolicy(host="SERVER_IP", port=8000)
+remote = DreamTacWebsocketClientPolicy(host="SERVER_IP", port=8000, request_timeout=120.0)
 assert remote.get_server_metadata()["rtc_supported"]
 broker = DreamTacRTCActionChunkBroker(
     remote, frequency_hz=30.0, prefix=14, delay_margin=2, dry_run=True,
@@ -121,10 +123,24 @@ trigger=prefix、blend_steps=0。不要再对已是绝对值的返回动作加 s
 参考版本预热把首个 chunk 的末尾动作当作启动前缀，会跳过首段动作；且在
 delay>10 时把历史估计设为4，导致第一次实际推理的 prefix 只有6。适配器先
 同步预热普通与 RTC 两条路径，以首个 chunk 的**开头**作为前缀，再启动后台
-调度；历史种子设为 `prefix-delay_margin`，之后使用原版的滚动最大实际延迟。
-`reset()` 先等待旧请求结束再清空队列，防止上一轮响应污染下一轮。调用者应
-在停止控制循环后调用 reset。适配器依赖上述版本的 broker 内部字段；升级
-Xense 后需运行下面的客户端测试。
+调度；历史种子设为 `prefix-delay_margin`，之后使用滚动最大实际消费步数加余量。
+适配器自行调度后台请求，沿用 Xense 的队列合并逻辑。读取动作索引、剩余前缀、
+控制线程消费和响应合并共用一把事务锁；网络请求期间释放锁，避免跳步或阻塞控制。
+每次响应都验证 `(40,20)`、有限值及冻结前缀逐元素相等，失败立即停止后台请求，
+下一次 `infer()` 抛出带原始异常原因的 `RuntimeError`。实际消费超出冻结前缀、
+或控制循环取到空队列时同样报错，不再在控制线程等待最多 5 秒。
+
+`DreamTacWebsocketClientPolicy` 为连接及接收设置超时（默认 120 秒，兼顾首次
+预热）；这不是实时延迟预算，实时预算仍由队列和 prefix 决定。超时会关闭旧连接，
+防止下一次请求误读迟到响应；`reset()` 时重新连接。不要将同一个 remote 同时
+交给多个 broker 或直接并发调用。
+
+`stop()` 默认先等待后台请求最多 2 秒（`stop_timeout`），未退出时调用上述
+transport 的取消接口关闭连接，再有限等待线程退出。使用不支持取消的其他 policy
+时，若线程仍运行则抛出 `TimeoutError`，保留队列并拒绝 reset；不能继续复用该
+broker，直到旧请求退出。停止之后的迟到响应不会合并。调用者应在停止控制循环后
+调用 `reset()`，正常 reset 后下次调用会重新预热。适配器依赖上述版本的 broker
+内部字段；升级 Xense 后需运行下面的客户端测试。
 
 队列触发阈值固定为构造时的 prefix，滚动估计不会自动提高该阈值。若部署 RTT
 超出预算，应停止并重新测量、调整 prefix/控制频率；不能依赖裁剪后的估计
@@ -162,5 +178,7 @@ python -m pytest -q cosmos_policy/experiments/robot/bi_flexiv/rtc_client_test.py
 
 该测试使用原版 Xense 队列，以 30 Hz 消费 100 个动作，模拟 360 ms 推理延迟，
 检查首次和后续 prefix 都覆盖实际消费步数，并检查从第0步开始、reset 后重新
-预热的动作顺序。无机器人连接；缺少客户端依赖的
+预热的动作顺序。另覆盖快照与消费竞争、NaN/Inf/错误形状/前缀漂移、空队列、
+前缀预算超限、观测缓冲区复用、不可取消请求的 reset 拒绝，以及真实本机
+WebSocket 的超时重连、stop 取消和重新预热。无机器人连接；缺少客户端依赖的
 推理环境会跳过此独立测试。
